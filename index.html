@@ -2163,10 +2163,16 @@ function supabaseHeaders(prefer=""){
   const key=supabaseKey();
   const h={
     "apikey":key,
-    "Authorization":`Bearer ${key}`,
     "Content-Type":"application/json",
     "Accept":"application/json"
   };
+
+  // Las claves sb_publishable_ no son JWT y no deben enviarse como Bearer.
+  // Solo una clave JWT legacy puede ir también en Authorization.
+  if(key.split(".").length===3 && key.startsWith("eyJ")){
+    h["Authorization"]=`Bearer ${key}`;
+  }
+
   if(prefer) h["Prefer"]=prefer;
   return h;
 }
@@ -2183,7 +2189,9 @@ async function supabaseFetch(table, query="", options={}, timeout=18000){
     let body=null;
     try{ body=txt ? JSON.parse(txt) : null; }catch(e){ body=txt; }
     if(!res.ok){
-      throw new Error(`Supabase ${res.status}: ${typeof body==="string"?body:JSON.stringify(body)}`);
+      const detail=typeof body==="string"?body:JSON.stringify(body);
+      console.error("NEXUS Supabase REST error",{status:res.status,table,detail});
+      throw new Error(`Supabase ${res.status}: ${detail}`);
     }
     return body;
   }finally{

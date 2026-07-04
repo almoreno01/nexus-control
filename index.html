@@ -333,6 +333,7 @@ function disableTable(a){
   if(!a) return;
   if(!disabledTables.includes(a)) disabledTables.push(a);
   saveDisabledTables();
+  saveCloudDebounced();
   if(state.account===a){
     state.account=accounts()[0]||"";
   }
@@ -341,6 +342,7 @@ function disableTable(a){
 function enableTable(a){
   disabledTables=disabledTables.filter(x=>x!==a);
   saveDisabledTables();
+  saveCloudDebounced();
   showNotice("La tabla fue habilitada nuevamente.", "Tabla habilitada", "✓");
 }
 function jsArg(v){
@@ -363,6 +365,7 @@ function deleteTableNow(account){
   users.forEach(u=>{ if(u.account===account) u.account=null; });
   saveUsers();
   saveDisabledTables();
+  saveCloudDebounced();
   if(state.account===account) state.account=accounts()[0]||"";
   showNotice("Tabla borrada correctamente.", "Tabla borrada", "✓");
 }
@@ -834,7 +837,7 @@ function confirmRow(id,val){
   setTimeout(()=>{state.confirmBusyId=null;},520);
 }
 function addMovement(){let amount=Number(document.getElementById("amount").value||0),type=document.getElementById("type").value,desc=document.getElementById("desc").value.trim(),date=document.getElementById("date").value;if(date>new Date().toISOString().slice(0,10)){showNotice("La fecha no puede ser superior a la actual.","Fecha inválida","!");return}if(amount<=0||!desc){showNotice("Completa cantidad y descripción.","Datos incompletos","!");return}const rec=touchRecord({id:newRecordId(),account:currentAccount(),currency:state.currency,date,entry:type==="entrada"?amount:0,exit:type==="salida"?amount:0,desc,confirmed:false});data.push(rec);queueRecordUpsert(rec);persistRecords();saveCloudDebounced();go("table")}
-function saveAppearance(){let s=settings();s.appearance=document.getElementById("appearance").value;s.fontSize=document.getElementById("fontSize").value;saveSettings(s);render()}
+function saveAppearance(){let s=settings();s.appearance=document.getElementById("appearance").value;s.fontSize=document.getElementById("fontSize").value;saveSettings(s);saveCloudDebounced();render()}
 function saveAdminSettings(){
   let s=settings();
 
@@ -896,27 +899,32 @@ function addHTML(){let a=currentAccount(),c=state.currency;if(!canAdd())return `
 function ensureAccountTables(account){
   if(!account) return;
   if(!allAccounts().includes(account)){
-    const nextId = data.length ? Math.max(...data.map(r=>r.id)) + 1 : 1;
-    data.push({
-      id: nextId,
+    const today = new Date().toISOString().slice(0,10);
+    const cup = touchRecord({
+      id: newRecordId(),
       account,
       currency:"CUP",
-      date:new Date().toISOString().slice(0,10),
+      date:today,
       entry:0,
       exit:0,
       desc:"Tabla creada",
       confirmed:true
     });
-    data.push({
-      id: nextId + 1,
+    const usd = touchRecord({
+      id: newRecordId(),
       account,
       currency:"USD",
-      date:new Date().toISOString().slice(0,10),
+      date:today,
       entry:0,
       exit:0,
       desc:"Tabla creada",
       confirmed:true
     });
+    data.push(cup);
+    data.push(usd);
+    queueRecordUpsert(cup);
+    queueRecordUpsert(usd);
+    persistRecords();
   }
 }
 function renameAccountIfSafe(oldAccount,newAccount){
@@ -960,9 +968,12 @@ function createUser(){
   if(hasError) return;
 
   users.push({username,password,name,role,account});
-  saveUsers();
 
   if(account) ensureAccountTables(account);
+
+  saveUsers();
+  persistRecords();
+  saveCloudDebounced();
 
   state.userCreateOpen=false;
   showNotice("Usuario creado correctamente.", "Usuario creado", "✓");
@@ -1012,6 +1023,8 @@ function saveUserEditModal(){
   if(account) renameAccountIfSafe(oldAccount,account);
 
   saveUsers();
+  persistRecords();
+  saveCloudDebounced();
 
   if(state.user && state.user.username===originalUsername){
     state.user = u;
@@ -1042,6 +1055,7 @@ function deleteUserNow(payload, deleteAssociatedTable=false){
 
   users = users.filter(x=>x.username!==username);
   saveUsers();
+  saveCloudDebounced();
   if(state.userEditUsername===username){
     state.userEditOpen=false;
     state.userEditUsername=null;
@@ -1190,7 +1204,7 @@ function usersHTML(){
 }
 function settingsHTML(){
   let s=settings(),isAdmin=state.user.role==="administrador";
-  return `<div class="card"><h3>Ajustes</h3>
+  return `<div class="card"><h3>Ajustes</h3>${typeof cloudStatusText==="function"?`<div class="smalltxt" style="margin-bottom:10px">Supabase: ${cloudStatusText().text}</div>`:""}
     <label>Aspecto de la app</label>
     <select id="appearance" onchange="${isAdmin?'saveAdminSettings()':'saveAppearance()'}">
       <option value="light" ${s.appearance==="light"?"selected":""}>Blanco / claro</option>
@@ -2110,17 +2124,22 @@ queueRecordDelete = function(r){
 function supabaseConfig(){
   return window.NEXUS_SUPABASE_CONFIG || {};
 }
+function supabaseKey(){
+  const c=supabaseConfig();
+  return String(c.anonKey || c.publishableKey || c.publishable || c.key || c.apiKey || "");
+}
 function cloudDocId(){
   return window.NEXUS_CLOUD_DOC || "equipo_principal";
 }
 function validCloudConfig(){
   const c=supabaseConfig();
+  const key=supabaseKey();
   return !!(
     c &&
     c.url &&
-    c.anonKey &&
+    key &&
     !String(c.url).includes("PEGAR_") &&
-    !String(c.anonKey).includes("PEGAR_")
+    !String(key).includes("PEGAR_")
   );
 }
 function cloudStatusText(){
@@ -2134,14 +2153,14 @@ function cloudStatusHTML(){
   return "";
 }
 function cleanSupabaseUrl(){
-  return String(supabaseConfig().url || "").replace(/\/+$/,"");
+  return String(supabaseConfig().url || "").trim().replace(/\/+$/,"");
 }
 function supabaseRestUrl(table, query=""){
   const base=`${cleanSupabaseUrl()}/rest/v1/${table}`;
   return query ? `${base}?${query}` : base;
 }
 function supabaseHeaders(prefer=""){
-  const key=String(supabaseConfig().anonKey || "");
+  const key=supabaseKey();
   const h={
     "apikey":key,
     "Authorization":`Bearer ${key}`,
@@ -2469,19 +2488,39 @@ async function flushPendingOps(){
 }
 function saveCloudDebounced(){
   persistAllLocal();
-  if(!nexusCloud.enabled || nexusCloud.applying) return;
+  if(nexusCloud.applying) return;
+  if(!validCloudConfig()){
+    nexusCloud.enabled=false;
+    nexusCloud.error="Supabase sin configurar";
+    nexusCloud.lastSyncOk=false;
+    updateSyncDotVisual();
+    return;
+  }
+  nexusCloud.enabled=true;
   clearTimeout(nexusCloud.saveTimer);
   nexusCloud.saveTimer=setTimeout(async ()=>{
     try{
+      nexusCloud.pendingWrites=true;
+      nexusCloud.lastSyncOk=false;
+      updateSyncDotVisual();
+
       await uploadMetadataSupabase();
+
       if(offlineOps.length){
         await flushPendingOps();
       }else{
         await pollCloudRecordsSupabase(false);
       }
+
+      nexusCloud.error="";
+      nexusCloud.pendingWrites=false;
+      nexusCloud.ready=true;
+      nexusCloud.lastSyncOk=currentLocalTableHash()===currentCloudTableHash();
+      updateSyncDotVisual();
     }catch(e){
-      console.warn("Guardado metadata Supabase falló:",e);
+      console.warn("Guardado Supabase falló:",e);
       nexusCloud.error=String(e.message||e);
+      nexusCloud.pendingWrites=false;
       nexusCloud.lastSyncOk=false;
       updateSyncDotVisual();
     }

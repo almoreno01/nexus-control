@@ -1,4 +1,4 @@
-const CACHE_NAME = "nexus-supabase-pwa-v1";
+const CACHE_NAME = "nexus-supabase-pwa-v2-savefix";
 const APP_ASSETS = [
   "./",
   "./index.html",

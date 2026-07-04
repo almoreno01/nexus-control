@@ -55,3 +55,15 @@ En iPhone/Safari:
 El SQL incluido deja lectura/escritura abierta para que funcione sin Supabase Auth.
 Esto es similar a las reglas abiertas usadas antes en backend anterior.
 Para uso real con más personas, conviene cerrar las políticas con autenticación.
+
+
+## Corrección savefix
+
+Esta versión corrige el guardado en Supabase:
+- Usuarios creados/editados/borrados se suben a `nexus_meta`.
+- Tablas creadas al crear usuarios se sincronizan también como registros.
+- Registros añadidos/editados/borrados fuerzan escritura en `nexus_records`.
+- Compatible con `anonKey` y con claves nuevas `sb_publishable_...`.
+- En Ajustes muestra estado básico de Supabase.
+
+Después de subir esta versión a GitHub, conserva tus datos reales en `supabase-config.js`.

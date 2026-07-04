@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Prueba Supabase NEXUS</title>
+<style>
+body{font-family:Arial,sans-serif;max-width:760px;margin:40px auto;padding:20px;background:#f4f7f9;color:#17313d}
+.card{background:white;border-radius:18px;padding:24px;box-shadow:0 8px 30px #0001}
+button{background:#104963;color:white;border:0;border-radius:12px;padding:14px 18px;font-weight:700;cursor:pointer}
+pre{white-space:pre-wrap;background:#0d1b22;color:#d6f4ff;padding:16px;border-radius:12px;min-height:160px}
+.ok{color:#087f5b}.bad{color:#c92a2a}
+</style>
+<script src="./supabase-config.js"></script>
+</head>
+<body>
+<div class="card">
+<h1>Prueba Supabase NEXUS</h1>
+<p>Esta prueba crea, lee y borra una fila temporal en <b>nexus_meta</b>.</p>
+<button onclick="probar()">Probar conexión</button>
+<h3 id="estado">Sin probar</h3>
+<pre id="log"></pre>
+</div>
+<script>
+function cfg(){ return window.NEXUS_SUPABASE_CONFIG || {}; }
+function key(){
+  const c=cfg();
+  return String(c.publishableKey || c.anonKey || c.publishable || c.key || c.apiKey || "");
+}
+function headers(prefer=""){
+  const k=key();
+  const h={apikey:k,"Content-Type":"application/json",Accept:"application/json"};
+  if(k.startsWith("eyJ") && k.split(".").length===3){
+    h.Authorization=`Bearer ${k}`;
+  }
+  if(prefer) h.Prefer=prefer;
+  return h;
+}
+function out(v){ document.getElementById("log").textContent += v+"\n"; }
+async function api(query="",options={}){
+  const base=String(cfg().url||"").trim().replace(/\/+$/,"");
+  const res=await fetch(base+"/rest/v1/nexus_meta"+(query?"?"+query:""),options);
+  const txt=await res.text();
+  out((options.method||"GET")+" -> HTTP "+res.status+" "+txt);
+  if(!res.ok) throw new Error("HTTP "+res.status+": "+txt);
+  try{return txt?JSON.parse(txt):null}catch{return txt}
+}
+async function probar(){
+  const e=document.getElementById("estado");
+  document.getElementById("log").textContent="";
+  e.className="";
+  e.textContent="Probando...";
+  try{
+    if(!cfg().url || !key() || String(cfg().url).includes("PEGA_AQUI") || key().includes("PEGA_AQUI")){
+      throw new Error("supabase-config.js no tiene la URL y la publishable key reales.");
+    }
+    const id="conexion_test_"+Date.now();
+    await api("on_conflict=id",{
+      method:"POST",
+      headers:headers("resolution=merge-duplicates,return=minimal"),
+      body:JSON.stringify({id,payload:{test:true,fecha:new Date().toISOString()},updated_at_client:Date.now()})
+    });
+    const rows=await api("id=eq."+encodeURIComponent(id)+"&select=id,payload",{
+      method:"GET",headers:headers()
+    });
+    if(!Array.isArray(rows)||rows.length!==1) throw new Error("La fila de prueba no pudo leerse.");
+    await api("id=eq."+encodeURIComponent(id),{
+      method:"DELETE",headers:headers("return=minimal")
+    });
+    e.textContent="CONEXIÓN CORRECTA";
+    e.className="ok";
+    out("OK: Supabase permite INSERT, SELECT y DELETE.");
+  }catch(err){
+    e.textContent="CONEXIÓN FALLIDA";
+    e.className="bad";
+    out("ERROR: "+(err.message||err));
+  }
+}
+</script>
+</body>
+</html>

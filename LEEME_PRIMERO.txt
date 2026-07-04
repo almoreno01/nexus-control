@@ -1,0 +1,44 @@
+NEXUS - REINICIO COMPLETO
+
+1. SUPABASE
+Abre Supabase > SQL Editor.
+Ejecuta completo: 01_REINICIAR_SUPABASE_DESDE_CERO.sql
+ADVERTENCIA: borra los datos NEXUS actuales.
+
+2. CONFIGURAR
+Abre supabase-config.js.
+Pega tu Project URL.
+Pega tu Publishable key sb_publishable_...
+No uses secret key ni service_role.
+
+3. GITHUB
+Borra los archivos actuales del repositorio nexus-control.
+Sube TODOS los archivos y la carpeta icons de este paquete a la raíz.
+Haz Commit changes.
+
+4. GITHUB PAGES
+Settings > Pages
+Source: Deploy from a branch
+Branch: main
+Folder: /(root)
+
+5. PRUEBA DE CONEXIÓN
+Abre:
+https://TU_USUARIO.github.io/nexus-control/probar-conexion.html
+
+Pulsa "Probar conexión".
+Debe decir: CONEXIÓN CORRECTA.
+
+6. APP
+Después abre:
+https://TU_USUARIO.github.io/nexus-control/
+
+Usuario: admin
+Contraseña: 1234
+
+7. VERIFICACIÓN
+Crea un usuario y un registro.
+En Supabase:
+- nexus_meta debe tener equipo_principal.
+- nexus_records debe tener movimientos.
+- nexus_audit debe tener operaciones.

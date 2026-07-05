@@ -1344,7 +1344,6 @@ function deleteAppNotification(encodedId){
 }
 
 function requestDeleteAllNotifications(){
-  if(!isReviewer() || !currentNotifications().length) return;
   deleteAllAppNotifications();
 }
 
@@ -1501,7 +1500,7 @@ function notificationsPanelHTML(){
         </div>
 
         <div class="notifications-head-actions">
-          ${list.length?`<button class="danger notification-clear-all" onclick="requestDeleteAllNotifications()">Eliminar todo</button>`:""}
+          ${list.length?`<button class="danger notification-clear-all" onclick="deleteAllAppNotifications()">Eliminar todo</button>`:""}
           <button class="secondary" onclick="closeNotificationsPanel()">Cerrar</button>
         </div>
       </div>
@@ -3300,10 +3299,6 @@ function confirmAccept(){
     deleteTableNow(payload);
     return;
   }
-  if(action==="deleteAllNotifications"){
-    deleteAllAppNotifications();
-    return;
-  }
 
   renderKeepScroll();
 }
@@ -3556,14 +3551,7 @@ let nexusCloud = {
   lastRefreshAttemptAt:0,
   lastRefreshSuccessAt:0,
   initialLoadDone:false,
-  initPromise:null,
-  remoteMetaHash:"",
-  remoteRecordsHash:"",
-  syncVerifiedAt:0,
-  verificationPromise:null,
-  lastVerificationReason:"",
-  lastMetadataReadAt:0,
-  lastRecordsReadAt:0
+  initPromise:null
 };
 
 function isEditableElement(el){
@@ -3765,7 +3753,6 @@ function stableRecordForHash(r){
     exit:Number(r.exit||0),
     desc:String(r.desc||""),
     confirmed:!!r.confirmed,
-    confirmationNote:String(r.confirmationNote||""),
     count:!!r.count
   };
 }
@@ -3784,237 +3771,6 @@ function tableHashFromRecords(records, account, currency){
     .sort((a,b)=>String(a.id).localeCompare(String(b.id)));
   return hashString(JSON.stringify(rows));
 }
-
-function canonicalSyncValue(value){
-  if(Array.isArray(value)){
-    return value.map(canonicalSyncValue);
-  }
-
-  if(value && typeof value==="object"){
-    const result={};
-    Object.keys(value)
-      .sort()
-      .forEach(key=>{
-        result[key]=canonicalSyncValue(value[key]);
-      });
-    return result;
-  }
-
-  return value;
-}
-
-function stableSyncString(value){
-  return JSON.stringify(canonicalSyncValue(value));
-}
-
-function sortedSyncList(list,keyFn){
-  return [...(Array.isArray(list)?list:[])]
-    .sort((a,b)=>String(keyFn(a)).localeCompare(String(keyFn(b))));
-}
-
-function metadataForSyncHash(payload){
-  const source=payload||{};
-
-  return {
-    users:sortedSyncList(
-      Array.isArray(source.users)?source.users:[],
-      user=>isPrimaryAdmin(user)
-        ? PRIMARY_ADMIN_ID
-        : String(user?.userId||user?.username||"")
-    ).map(user=>({
-      userId:String(user?.userId||""),
-      isPrimaryAdmin:!!user?.isPrimaryAdmin,
-      username:String(user?.username||""),
-      password:String(user?.password||""),
-      name:String(user?.name||""),
-      role:String(user?.role||""),
-      account:normalizeAccountName(user?.account)||null,
-      _updatedAt:Number(user?._updatedAt||0),
-      accountUpdatedAt:Number(user?.accountUpdatedAt||0)
-    })),
-
-    usersUpdatedAt:Number(source.usersUpdatedAt||0),
-
-    deletedUsers:sortedSyncList(
-      Array.isArray(source.deletedUsers)?source.deletedUsers:[],
-      item=>String(item?.username||"")
-    ).map(item=>({
-      username:String(item?.username||""),
-      deletedAt:Number(item?.deletedAt||0)
-    })),
-
-    disabledTables:[...(Array.isArray(source.disabledTables)?source.disabledTables:[])]
-      .map(String)
-      .sort(),
-
-    alerts:sortedSyncList(
-      Array.isArray(source.alerts)?source.alerts:[],
-      item=>String(item?.id||"")
-    ),
-
-    notifications:sortedSyncList(
-      Array.isArray(source.notifications)?source.notifications:[],
-      item=>String(item?.id||"")
-    ).map(item=>{
-      const normalized=normalizeAppNotification(item);
-      if(!normalized) return null;
-
-      return {
-        ...normalized,
-        readBy:[...(normalized.readBy||[])].map(String).sort(),
-        deletedBy:[...(normalized.deletedBy||[])].map(String).sort()
-      };
-    }).filter(Boolean),
-
-    alertStates:source.alertStates||{},
-    settings:source.settings||{},
-    resetVersion:String(source.resetVersion||"")
-  };
-}
-
-function metadataSyncHash(payload){
-  return hashString(
-    stableSyncString(metadataForSyncHash(payload))
-  );
-}
-
-function localMetadataSyncHash(){
-  return metadataSyncHash(cloudPayload());
-}
-
-function recordsSyncHash(records,deletedList){
-  const active=(records||[])
-    .filter(record=>record && !record._deleted)
-    .map(stableRecordForHash)
-    .sort((a,b)=>String(a.id).localeCompare(String(b.id)));
-
-  const deleted=[
-    ...new Set(
-      (deletedList||[])
-        .filter(Boolean)
-        .map(item=>String(item.id||""))
-        .filter(Boolean)
-    )
-  ].sort();
-
-  return hashString(
-    stableSyncString({
-      active,
-      deleted
-    })
-  );
-}
-
-function localRecordsSyncHash(){
-  return recordsSyncHash(data,deletedRecords);
-}
-
-function remoteRecordsSyncHash(){
-  return recordsSyncHash(
-    nexusCloud.cloudRecordsCache||[],
-    nexusCloud.cloudDeletedCache||[]
-  );
-}
-
-function cloudStateMatchesLocal(){
-  if(!nexusCloud.remoteMetaHash || !nexusCloud.remoteRecordsHash){
-    return false;
-  }
-
-  return (
-    localMetadataSyncHash()===nexusCloud.remoteMetaHash &&
-    localRecordsSyncHash()===nexusCloud.remoteRecordsHash
-  );
-}
-
-function syncVerificationIsFresh(){
-  const verifiedAt=Number(nexusCloud.syncVerifiedAt||0);
-  return verifiedAt>0 && Date.now()-verifiedAt<=22000;
-}
-
-function invalidateSyncVerification(reason="local-change"){
-  nexusCloud.lastSyncOk=false;
-  nexusCloud.syncVerifiedAt=0;
-  nexusCloud.lastVerificationReason=String(reason||"");
-  updateSyncDotVisual();
-}
-
-function waitForSync(ms){
-  return new Promise(resolve=>setTimeout(resolve,ms));
-}
-
-async function verifyCloudConsistency(reason="verify",attempts=3){
-  if(!validCloudConfig() || navigator.onLine===false){
-    invalidateSyncVerification(`${reason}:offline`);
-    return false;
-  }
-
-  if(nexusCloud.verificationPromise){
-    return nexusCloud.verificationPromise;
-  }
-
-  nexusCloud.verificationPromise=(async ()=>{
-    nexusCloud.lastSyncOk=false;
-    nexusCloud.syncVerifiedAt=0;
-    nexusCloud.lastVerificationReason=String(reason||"verify");
-    updateSyncDotVisual();
-
-    let lastError=null;
-
-    for(let attempt=1;attempt<=Math.max(1,Number(attempts||1));attempt++){
-      try{
-        await readMetadataSupabase(false);
-        await pollCloudRecordsSupabase(false);
-
-        if(cloudStateMatchesLocal()){
-          nexusCloud.error="";
-          nexusCloud.ready=true;
-          nexusCloud.lastSyncOk=true;
-          nexusCloud.lastSyncAt=Date.now();
-          nexusCloud.syncVerifiedAt=Date.now();
-          nexusCloud.lastVerificationReason=`${reason}:ok`;
-          updateSyncDotVisual();
-          return true;
-        }
-
-        // Metadata distinta sin escrituras pendientes:
-        // publicar el estado ya premezclado y volver a verificar por lectura.
-        if(
-          !nexusCloud.pendingWrites &&
-          !nexusCloud.syncing &&
-          !offlineOps.length &&
-          localMetadataSyncHash()!==nexusCloud.remoteMetaHash
-        ){
-          await uploadMetadataSupabase();
-        }
-
-        lastError=new Error("El estado remoto todavía no coincide con el estado local");
-      }catch(error){
-        lastError=error;
-      }
-
-      if(attempt<attempts){
-        await waitForSync(350*attempt);
-      }
-    }
-
-    nexusCloud.lastSyncOk=false;
-    nexusCloud.syncVerifiedAt=0;
-    nexusCloud.lastVerificationReason=`${reason}:mismatch`;
-
-    if(lastError){
-      nexusCloud.error=String(lastError.message||lastError);
-    }
-
-    updateSyncDotVisual();
-    return false;
-  })().finally(()=>{
-    nexusCloud.verificationPromise=null;
-  });
-
-  return nexusCloud.verificationPromise;
-}
-
 function currentLocalTableHash(){
   return tableHashFromRecords(data,currentAccount(),state.currency);
 }
@@ -4022,22 +3778,17 @@ function currentCloudTableHash(){
   return tableHashFromRecords(nexusCloud.cloudRecordsCache||[],currentAccount(),state.currency);
 }
 function dbIsSynced(){
+  const account=currentAccount();
+  if(!account) return false;
   return !!(
     deviceHasConnection() &&
-    nexusCloud.initialized &&
-    nexusCloud.initialLoadDone &&
     nexusCloud.ready &&
     nexusCloud.lastSyncOk &&
-    syncVerificationIsFresh() &&
     !nexusCloud.error &&
     !nexusCloud.syncing &&
     !nexusCloud.pendingWrites &&
-    !nexusCloud.saveTimer &&
-    !nexusCloud.refreshPromise &&
-    !nexusCloud.verificationPromise &&
-    !nexusCloud.pendingPayload &&
     !offlineOps.length &&
-    cloudStateMatchesLocal()
+    currentLocalTableHash()===currentCloudTableHash()
   );
 }
 function syncLineHTML(){
@@ -4050,7 +3801,8 @@ function updateSyncLineVisual(){
   line.classList.remove("active","done");
 }
 function markUnsynced(){
-  invalidateSyncVerification("record-change");
+  nexusCloud.lastSyncOk=false;
+  updateSyncDotVisual();
 }
 const __queueRecordUpsert_supabase_v1 = queueRecordUpsert;
 queueRecordUpsert = function(r){
@@ -4225,41 +3977,16 @@ async function uploadMetadataSupabase(payloadOverride=null){
 }
 async function readMetadataSupabase(renderAfter=false){
   if(!validCloudConfig()) return false;
-
   const q=`id=eq.${encodeURIComponent(cloudDocId())}&select=payload,updated_at_client&limit=1`;
-
-  const rows=await supabaseFetch(
-    "nexus_meta",
-    q,
-    {
-      method:"GET",
-      headers:supabaseHeaders()
-    },
-    18000
-  );
-
+  const rows=await supabaseFetch("nexus_meta", q, {method:"GET", headers:supabaseHeaders()}, 18000);
   if(Array.isArray(rows) && rows.length && rows[0].payload){
-    const remotePayload=rows[0].payload;
-
-    nexusCloud.remoteMetaHash=metadataSyncHash(remotePayload);
-    nexusCloud.lastMetadataReadAt=Date.now();
-
-    applyCloudSnapshot(remotePayload);
-
+    applyCloudSnapshot(rows[0].payload);
     nexusCloud.ready=true;
     nexusCloud.error="";
-
     updateSyncDotVisual();
-
-    if(renderAfter && !shouldDeferCloudRender()){
-      render();
-    }
-
+    if(renderAfter && !shouldDeferCloudRender()) render();
     return true;
   }
-
-  nexusCloud.remoteMetaHash="";
-  invalidateSyncVerification("metadata-missing");
   return false;
 }
 function recordDocPayloadFromOp(op){
@@ -4396,126 +4123,72 @@ async function fallbackSyncMainDoc(opsToFlush){
 }
 async function pollCloudRecordsSupabase(renderAfter=false){
   if(!validCloudConfig()) return false;
-
   try{
     const q=`cloud_doc=eq.${encodeURIComponent(cloudDocId())}&select=record_id,payload,updated_at_client,deleted&order=updated_at_client.desc&limit=1600`;
-
-    const rows=await supabaseFetch(
-      "nexus_records",
-      q,
-      {
-        method:"GET",
-        headers:supabaseHeaders()
-      },
-      22000
-    );
+    const rows=await supabaseFetch("nexus_records", q, {method:"GET", headers:supabaseHeaders()}, 22000);
 
     const cloudDeleted=[];
     const cloudActive=[];
-
     (rows||[]).forEach(row=>{
-      const record=row.payload||{};
-
-      if(row.deleted || record._deleted){
-        cloudDeleted.push({
-          id:record.id||row.record_id,
-          deletedAt:
-            record.deletedAt||
-            record._updatedAt||
-            row.updated_at_client||
-            Date.now(),
-          clientId:record._clientId||""
-        });
-      }else if(record.id){
-        cloudActive.push(record);
+      const r=row.payload || {};
+      if(row.deleted || r._deleted){
+        cloudDeleted.push({id:r.id || row.record_id, deletedAt:r.deletedAt||r._updatedAt||row.updated_at_client||Date.now(), clientId:r._clientId||""});
+      }else if(r.id){
+        cloudActive.push(r);
       }
     });
 
-    nexusCloud.cloudDeletedCache=mergeDeletedRecords(
-      cloudDeleted,
-      nexusCloud.cloudDeletedCache||[]
-    );
+    nexusCloud.cloudDeletedCache=mergeDeletedRecords(cloudDeleted,nexusCloud.cloudDeletedCache||[]);
+    nexusCloud.cloudRecordsCache=mergeRecords(cloudActive,nexusCloud.cloudRecordsCache||[],nexusCloud.cloudDeletedCache);
 
-    nexusCloud.cloudRecordsCache=mergeRecords(
-      cloudActive,
-      nexusCloud.cloudRecordsCache||[],
-      nexusCloud.cloudDeletedCache
-    );
-
-    // La huella remota se calcula con lo que Supabase acaba de devolver.
-    nexusCloud.remoteRecordsHash=recordsSyncHash(
-      nexusCloud.cloudRecordsCache,
-      nexusCloud.cloudDeletedCache
-    );
-    nexusCloud.lastRecordsReadAt=Date.now();
-
-    deletedRecords=mergeDeletedRecords(
-      deletedRecords,
-      nexusCloud.cloudDeletedCache
-    );
-
-    data=mergeRecords(
-      nexusCloud.cloudRecordsCache,
-      data,
-      deletedRecords
-    );
-
+    deletedRecords=mergeDeletedRecords(deletedRecords,nexusCloud.cloudDeletedCache);
+    data=mergeRecords(nexusCloud.cloudRecordsCache,data,deletedRecords);
     persistRecords();
     saveDeletedRecords();
 
     const generatedAlerts=evaluateAlertThresholds({deliver:true});
-    if(generatedAlerts>0){
-      await uploadMetadataSupabase();
-    }
+    if(generatedAlerts>0) await uploadMetadataSupabase();
 
     nexusCloud.ready=true;
-    updateSyncDotVisual();
-
-    if(renderAfter && !shouldDeferCloudRender()){
-      render();
+    if(!offlineOps.length && !nexusCloud.syncing && currentLocalTableHash()===currentCloudTableHash()){
+      nexusCloud.lastSyncOk=true;
+      nexusCloud.error="";
     }
-
+    updateSyncDotVisual();
+    if(renderAfter && !shouldDeferCloudRender()) render();
     return true;
-  }catch(error){
-    console.warn("Supabase poll records falló:",error);
-    nexusCloud.error=String(error.message||error);
-    invalidateSyncVerification("records-read-error");
+  }catch(e){
+    console.warn("Supabase poll records falló:",e);
+    nexusCloud.error=String(e.message||e);
+    nexusCloud.lastSyncOk=false;
+    updateSyncDotVisual();
     return false;
   }
 }
-async function flushPendingOps(verifyAfter=true){
-  if(!nexusCloud.enabled || nexusCloud.syncing) return false;
-  if(!offlineOps.length){
-    if(verifyAfter){
-      return verifyCloudConsistency("flush-empty",2);
-    }
-    return true;
-  }
+async function flushPendingOps(){
+  if(!nexusCloud.enabled || nexusCloud.syncing) return;
+  if(!offlineOps.length) return;
 
   if(navigator.onLine===false){
-    invalidateSyncVerification("flush-offline");
-    return false;
+    nexusCloud.lastSyncOk=false;
+    updateSyncDotVisual();
+    return;
   }
 
   nexusCloud.syncing=true;
   nexusCloud.pendingWrites=true;
-  invalidateSyncVerification("flush-start");
+  nexusCloud.lastSyncOk=false;
+  updateSyncDotVisual();
 
   const opsToFlush=[...offlineOps];
-  const opIds=new Set(
-    opsToFlush.map(operation=>operation.opId)
-  );
+  const opIds=new Set(opsToFlush.map(op=>op.opId));
 
   try{
     let saved=false;
-
     try{
       saved=await uploadOpsAsRecordDocs(opsToFlush);
-    }catch(error){
-      console.warn(
-        "Supabase records falló, usando respaldo metadata:",
-        error
-      );
+    }catch(e){
+      console.warn("Supabase records falló, usando respaldo metadata:",e);
       saved=false;
     }
 
@@ -4523,136 +4196,82 @@ async function flushPendingOps(verifyAfter=true){
       saved=await fallbackSyncMainDoc(opsToFlush);
     }
 
-    if(!saved){
-      throw new Error(
-        "No se pudo confirmar guardado remoto en Supabase"
-      );
-    }
+    if(!saved) throw new Error("No se pudo confirmar guardado remoto en Supabase");
 
-    const applied=applyOpsToState(
-      nexusCloud.cloudRecordsCache||[],
-      nexusCloud.cloudDeletedCache||[],
-      opsToFlush
-    );
-
+    const applied=applyOpsToState(nexusCloud.cloudRecordsCache||[],nexusCloud.cloudDeletedCache||[],opsToFlush);
     nexusCloud.cloudRecordsCache=applied.records;
     nexusCloud.cloudDeletedCache=applied.deletedRecords;
 
-    offlineOps=offlineOps.filter(
-      operation=>!opIds.has(operation.opId)
-    );
+    offlineOps=offlineOps.filter(op=>!opIds.has(op.opId));
     saveOfflineOps();
 
     nexusCloud.error="";
     nexusCloud.syncing=false;
     nexusCloud.pendingWrites=false;
-    nexusCloud.lastSyncOk=false;
-    nexusCloud.syncVerifiedAt=0;
+    nexusCloud.lastSyncOk=!offlineOps.length && currentLocalTableHash()===currentCloudTableHash();
     nexusCloud.lastSyncAt=Date.now();
-
     updateSyncDotVisual();
 
-    if(verifyAfter){
-      const verified=await verifyCloudConsistency(
-        "post-flush",
-        3
-      );
-
-      if(!verified){
-        scheduleCloudRefresh(
-          "post-flush-retry",
-          900,
-          false,
-          true
-        );
-      }
-    }
+    setTimeout(()=>pollCloudRecordsSupabase(false),1200);
 
     if(offlineOps.length){
-      setTimeout(()=>flushPendingOps(true),650);
+      setTimeout(flushPendingOps,800);
     }
-
-    return true;
-  }catch(error){
-    console.error("NEXUS Supabase sync error:",error);
-
-    nexusCloud.error=String(error.message||error);
+  }catch(e){
+    console.error("NEXUS Supabase sync error:",e);
+    nexusCloud.error=String(e.message||e);
+    nexusCloud.lastSyncOk=false;
     nexusCloud.syncing=false;
     nexusCloud.pendingWrites=false;
-
-    invalidateSyncVerification("flush-error");
-
+    updateSyncDotVisual();
     setTimeout(()=>{
-      if(
-        navigator.onLine!==false &&
-        offlineOps.length &&
-        !nexusCloud.syncing
-      ){
-        flushPendingOps(true);
-      }
-    },1800);
-
-    return false;
+      if(navigator.onLine!==false && offlineOps.length && !nexusCloud.syncing) flushPendingOps();
+    },2500);
   }finally{
-    if(!shouldDeferCloudRender()){
-      render();
-    }
+    if(!shouldDeferCloudRender()) render();
   }
 }
 function saveCloudDebounced(){
   evaluateAlertThresholds({deliver:true});
   persistAllLocal();
-  invalidateSyncVerification("save-debounced");
-
   if(nexusCloud.applying) return;
-
   if(!validCloudConfig()){
     nexusCloud.enabled=false;
     nexusCloud.error="Supabase sin configurar";
-    invalidateSyncVerification("supabase-not-configured");
+    nexusCloud.lastSyncOk=false;
+    updateSyncDotVisual();
     return;
   }
-
   nexusCloud.enabled=true;
-
   clearTimeout(nexusCloud.saveTimer);
-
   nexusCloud.saveTimer=setTimeout(async ()=>{
     nexusCloud.saveTimer=null;
-
     try{
       nexusCloud.pendingWrites=true;
-      invalidateSyncVerification("save-start");
+      nexusCloud.lastSyncOk=false;
+      updateSyncDotVisual();
 
       await uploadMetadataSupabase();
 
       if(offlineOps.length){
-        await flushPendingOps(false);
+        await flushPendingOps();
+      }else{
+        await pollCloudRecordsSupabase(false);
       }
 
+      nexusCloud.error="";
       nexusCloud.pendingWrites=false;
       nexusCloud.ready=true;
-
-      const verified=await verifyCloudConsistency(
-        "post-save",
-        3
-      );
-
-      if(!verified){
-        scheduleCloudRefresh(
-          "post-save-retry",
-          900,
-          false,
-          true
-        );
-      }
-    }catch(error){
-      console.warn("Guardado Supabase falló:",error);
-      nexusCloud.error=String(error.message||error);
+      nexusCloud.lastSyncOk=currentLocalTableHash()===currentCloudTableHash();
+      updateSyncDotVisual();
+    }catch(e){
+      console.warn("Guardado Supabase falló:",e);
+      nexusCloud.error=String(e.message||e);
       nexusCloud.pendingWrites=false;
-      invalidateSyncVerification("save-error");
+      nexusCloud.lastSyncOk=false;
+      updateSyncDotVisual();
     }
-  },300);
+  },420);
 }
 function applyCloudSnapshot(payload){
   if(!payload) return;
@@ -4735,84 +4354,47 @@ function scheduleCloudRefresh(reason="context",delay=80,renderAfter=true,force=f
 }
 
 async function refreshCloudNow(reason="manual",renderAfter=true,force=false){
-  if(
-    !nexusCloud.initialized ||
-    !validCloudConfig() ||
-    navigator.onLine===false
-  ){
-    invalidateSyncVerification(`${reason}:unavailable`);
+  if(!nexusCloud.initialized || !validCloudConfig() || navigator.onLine===false) return false;
+
+  // Si hay un guardado local a punto de ejecutarse, dejarlo salir primero.
+  // Así un cambio de panel no descarga una copia vieja antes de subir lo recién editado.
+  if(nexusCloud.saveTimer || nexusCloud.pendingWrites || nexusCloud.syncing){
+    scheduleCloudRefresh(reason,550,renderAfter,force);
     return false;
   }
 
-  if(
-    nexusCloud.saveTimer ||
-    nexusCloud.pendingWrites ||
-    nexusCloud.syncing
-  ){
-    scheduleCloudRefresh(
-      reason,
-      400,
-      renderAfter,
-      force
-    );
-    return false;
-  }
-
-  if(nexusCloud.refreshPromise){
-    return nexusCloud.refreshPromise;
-  }
+  if(nexusCloud.refreshPromise) return nexusCloud.refreshPromise;
 
   const now=Date.now();
-
-  if(
-    !force &&
-    now-Number(nexusCloud.lastRefreshAttemptAt||0)<500
-  ){
-    return false;
-  }
-
+  if(!force && now-Number(nexusCloud.lastRefreshAttemptAt||0)<700) return false;
   nexusCloud.lastRefreshAttemptAt=now;
-  invalidateSyncVerification(`refresh:${reason}`);
 
   nexusCloud.refreshPromise=(async ()=>{
     try{
       if(offlineOps.length){
-        await flushPendingOps(false);
+        await flushPendingOps();
       }
 
-      if(nexusCloud.syncing || nexusCloud.pendingWrites){
-        return false;
-      }
+      if(nexusCloud.syncing || nexusCloud.pendingWrites) return false;
 
-      const verified=await verifyCloudConsistency(
-        `refresh:${reason}`,
-        force?3:2
-      );
+      await readMetadataSupabase(false);
+      await pollCloudRecordsSupabase(false);
 
-      if(verified){
-        nexusCloud.lastRefreshSuccessAt=Date.now();
-      }else{
-        scheduleCloudRefresh(
-          `verify-retry:${reason}`,
-          900,
-          false,
-          true
-        );
-      }
+      nexusCloud.error="";
+      nexusCloud.ready=true;
+      nexusCloud.lastRefreshSuccessAt=Date.now();
+      nexusCloud.lastSyncAt=Date.now();
+      nexusCloud.lastSyncOk=
+        !offlineOps.length &&
+        !nexusCloud.pendingWrites &&
+        currentLocalTableHash()===currentCloudTableHash();
 
-      if(renderAfter){
-        renderAfterCloudRefresh();
-      }
-
-      return verified;
-    }catch(error){
-      console.warn(
-        `Actualización Supabase (${reason}) falló:`,
-        error
-      );
-
-      nexusCloud.error=String(error.message||error);
-      invalidateSyncVerification(`refresh-error:${reason}`);
+      if(renderAfter) renderAfterCloudRefresh();
+      return true;
+    }catch(e){
+      console.warn(`Actualización Supabase (${reason}) falló:`,e);
+      nexusCloud.error=String(e.message||e);
+      nexusCloud.lastSyncOk=false;
       return false;
     }finally{
       nexusCloud.refreshPromise=null;
@@ -4847,18 +4429,16 @@ function setupCloudRefreshTriggers(){
 
   document.addEventListener("visibilitychange",()=>{
     if(document.visibilityState==="visible"){
-      invalidateSyncVerification("visible");
-      scheduleCloudRefresh("visible",20,true,true);
+      scheduleCloudRefresh("visible",40,true,true);
     }
   });
 
   window.addEventListener("focus",()=>{
-    scheduleCloudRefresh("focus",40,true,true);
+    scheduleCloudRefresh("focus",80,true,false);
   });
 
   window.addEventListener("pageshow",()=>{
-    invalidateSyncVerification("pageshow");
-    scheduleCloudRefresh("pageshow",20,true,true);
+    scheduleCloudRefresh("pageshow",80,true,true);
   });
 }
 
@@ -4866,96 +4446,80 @@ function setupCloudRefreshTriggers(){
 
 
 async function initCloudSync(){
-  if(nexusCloud.initPromise){
-    return nexusCloud.initPromise;
-  }
+  if(nexusCloud.initPromise) return nexusCloud.initPromise;
 
   nexusCloud.initialized=true;
 
   nexusCloud.initPromise=(async ()=>{
     nexusCloud.cloudRecordsCache=[];
     nexusCloud.cloudDeletedCache=[];
-    nexusCloud.remoteMetaHash="";
-    nexusCloud.remoteRecordsHash="";
-    nexusCloud.syncVerifiedAt=0;
     nexusCloud.enabled=false;
     nexusCloud.ready=false;
     nexusCloud.error="";
 
     if(!validCloudConfig()){
       console.warn("NEXUS: Supabase no configurado.");
-      invalidateSyncVerification("init-no-config");
+      nexusCloud.lastSyncOk=false;
       nexusCloud.initialLoadDone=true;
+      updateSyncDotVisual();
       return false;
     }
 
     nexusCloud.enabled=true;
 
     try{
+      // En un dispositivo nuevo, la nube es la fuente inicial.
+      // Nunca se borra ni reinicia información por no existir localStorage.
       const hasMeta=await readMetadataSupabase(false);
 
       if(!hasMeta){
+        // Solo si el documento cloud realmente no existe se publica el estado local.
         await uploadMetadataSupabase();
       }
 
       await pollCloudRecordsSupabase(true);
 
-      if(
-        data.length &&
-        !(nexusCloud.cloudRecordsCache||[]).length &&
-        !offlineOps.length &&
-        !hasMeta
-      ){
-        data.forEach(record=>queueRecordUpsert(record));
+      if(data.length && !(nexusCloud.cloudRecordsCache||[]).length && !offlineOps.length && !hasMeta){
+        data.forEach(r=>queueRecordUpsert(r));
       }
 
       if(offlineOps.length){
-        await flushPendingOps(false);
+        await flushPendingOps();
+      }else{
+        nexusCloud.lastSyncOk=currentLocalTableHash()===currentCloudTableHash();
+        nexusCloud.ready=true;
+        updateSyncDotVisual();
       }
-
-      nexusCloud.ready=true;
-      nexusCloud.initialLoadDone=true;
-
-      const verified=await verifyCloudConsistency(
-        "initial-load",
-        3
-      );
 
       revalidateActiveSession();
 
       if(!nexusCloud.refreshInterval){
         nexusCloud.refreshInterval=setInterval(()=>{
           updateSyncDotVisual();
-
-          if(
-            document.visibilityState==="visible" &&
-            navigator.onLine!==false
-          ){
-            scheduleCloudRefresh(
-              "respaldo-periodico",
-              0,
-              false,
-              false
-            );
+          if(document.visibilityState==="visible" && navigator.onLine!==false){
+            scheduleCloudRefresh("respaldo-periodico",0,false,false);
           }
-        },8000);
+        },12000);
       }
 
-      return verified;
-    }catch(error){
-      console.error("NEXUS Supabase init error:",error);
-      nexusCloud.error=String(error.message||error);
-      nexusCloud.initialLoadDone=true;
-      invalidateSyncVerification("init-error");
+      return true;
+    }catch(e){
+      console.error("NEXUS Supabase init error:",e);
+      nexusCloud.error=String(e.message||e);
+      nexusCloud.lastSyncOk=false;
+      updateSyncDotVisual();
       return false;
+    }finally{
+      nexusCloud.initialLoadDone=true;
     }
   })();
 
   return nexusCloud.initPromise;
 }
 window.addEventListener("online",()=>{
-  invalidateSyncVerification("online");
-  scheduleCloudRefresh("online",40,true,true);
+  nexusCloud.lastSyncOk=false;
+  updateSyncDotVisual();
+  scheduleCloudRefresh("online",120,true,true);
 });
 window.addEventListener("offline",()=>{
   nexusCloud.lastSyncOk=false;

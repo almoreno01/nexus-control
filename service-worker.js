@@ -1,4 +1,4 @@
-const CACHE_NAME = "nexus-pwa-verified-sync-v15-5";
+const CACHE_NAME = "nexus-pwa-delete-all-direct-v15-5";
 const APP_ASSETS = [
   "./",
   "./index.html",

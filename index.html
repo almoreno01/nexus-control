@@ -145,8 +145,8 @@ function canEditUser(target){
   // o ser modificado por el administrador principal.
   if(target.role==="administrador"){
     return isPrimaryAdmin(state.user) ||
-      String(state.user?.username||"").trim().toLowerCase()===
-      String(target?.username||"").trim().toLowerCase();
+      normalizeLoginUsername(state.user?.username)===
+      normalizeLoginUsername(target?.username);
   }
 
   // Usuarios y supervisores conservan la administración normal.
@@ -156,8 +156,8 @@ function canEditUser(target){
 function canDeleteUser(target){
   if(!state.user || state.user.role!=="administrador" || !target) return false;
   if(isPrimaryAdmin(target)) return false;
-  if(String(state.user?.username||"").trim().toLowerCase()===
-     String(target?.username||"").trim().toLowerCase()) return false;
+  if(normalizeLoginUsername(state.user?.username)===
+     normalizeLoginUsername(target?.username)) return false;
 
   // Los administradores secundarios solo pueden ser borrados por el principal.
   if(target.role==="administrador"){
@@ -180,6 +180,10 @@ const OFFLINE_OPS_KEY = "nexus_offline_ops_v1";
 const DELETED_RECORDS_KEY = "nexus_deleted_records_v1";
 const DELETED_USERS_KEY = "nexus_deleted_users_v1";
 const USERS_UPDATED_AT_KEY = "nexus_users_updated_at_v1";
+
+const NEXUS_VAPID_PUBLIC_KEY = "BGZiWtIrUlSU_RWPxQ8r4jo_qlk5jEzLPUDk3yBeNqr3-Np9ev07IA79Z1caRMqo0dULaXlzMHWGMwx5dLBuiu4";
+const NEXUS_PUSH_TABLE = "nexus_push_subscriptions";
+
 const ALERTS_KEY = "nexus_alerts_v1";
 const APP_NOTIFICATIONS_KEY = "nexus_app_notifications_v1";
 const ALERT_STATES_KEY = "nexus_alert_states_v1";
@@ -235,7 +239,7 @@ function mergeUsersStable(localList,remoteList,deletedList=deletedUsers){
 
     const deletedAt=Number(
       (deletedList||[]).find(x=>
-        String(x.username||"").trim().toLowerCase()===normalized.username
+        normalizeLoginUsername(x.username)===normalized.username
       )?.deletedAt||0
     );
 
@@ -264,7 +268,7 @@ function normalizeDeletedUsers(list){
   const map=new Map();
   (Array.isArray(list)?list:[]).forEach(x=>{
     if(!x) return;
-    const username=String(x.username||"").trim().toLowerCase();
+    const username=normalizeLoginUsername(x.username);
     if(!username) return;
     const deletedAt=Number(x.deletedAt||0);
     const prev=map.get(username);
@@ -279,32 +283,37 @@ function saveDeletedUsers(){
   localStorage.setItem(DELETED_USERS_KEY,JSON.stringify(deletedUsers));
 }
 function deletedUserAt(username){
-  username=String(username||"").trim().toLowerCase();
-  const t=deletedUsers.find(x=>x.username===username);
+  username=normalizeLoginUsername(username);
+  const t=deletedUsers.find(x=>normalizeLoginUsername(x.username)===username);
   return Number(t?.deletedAt||0);
 }
 function markUserDeleted(username){
-  username=String(username||"").trim().toLowerCase();
+  username=normalizeLoginUsername(username);
   if(!username) return;
-  const target=users.find(u=>String(u?.username||"").trim().toLowerCase()===username);
+
+  const target=users.find(u=>
+    normalizeLoginUsername(u?.username)===username
+  );
   if(isPrimaryAdmin(target)) return;
 
   const now=Date.now();
   deletedUsers=normalizeDeletedUsers([
-    ...deletedUsers.filter(x=>x.username!==username),
+    ...deletedUsers.filter(x=>normalizeLoginUsername(x.username)!==username),
     {username,deletedAt:now}
   ]);
   saveDeletedUsers();
 }
 function clearUserDeleted(username){
-  username=String(username||"").trim().toLowerCase();
-  deletedUsers=deletedUsers.filter(x=>x.username!==username);
+  username=normalizeLoginUsername(username);
+  deletedUsers=deletedUsers.filter(
+    x=>normalizeLoginUsername(x.username)!==username
+  );
   saveDeletedUsers();
 }
 function filterDeletedUsers(list){
   return (Array.isArray(list)?list:[]).filter(u=>{
     if(isPrimaryAdmin(u)) return true;
-    const username=String(u?.username||"").trim().toLowerCase();
+    const username=normalizeLoginUsername(u?.username);
     const deletedAt=deletedUserAt(username);
     return !deletedAt || userSyncTime(u)>deletedAt;
   });
@@ -349,6 +358,9 @@ let state = {
   loginBusy:false,
   loginMessage:"",
   loginMessageType:"",
+  loginUsernameDraft:"",
+  loginPasswordDraft:"",
+  loginPasswordVisible:false,
   notificationsOpen:false,
   alertCreateOpen:false
 };
@@ -853,29 +865,170 @@ function notificationBellHTML(){
     ${count?`<span class="notification-badge">${count>99?"99+":count}</span>`:""}
   </button>`;
 }
+
+function pushSupported(){
+  return !!(
+    "Notification" in window &&
+    "serviceWorker" in navigator &&
+    "PushManager" in window
+  );
+}
+
+function vapidPublicKeyBytes(base64String){
+  const padding="=".repeat((4-base64String.length%4)%4);
+  const base64=(base64String+padding).replace(/-/g,"+").replace(/_/g,"/");
+  const rawData=atob(base64);
+  return Uint8Array.from([...rawData].map(char=>char.charCodeAt(0)));
+}
+
+async function savePushSubscriptionToCloud(subscription){
+  if(!subscription || !state.user || !isReviewer() || !validCloudConfig()) return false;
+
+  const json=typeof subscription.toJSON==="function"
+    ? subscription.toJSON()
+    : subscription;
+
+  const endpoint=String(json?.endpoint||subscription.endpoint||"");
+  if(!endpoint) return false;
+
+  const row={
+    endpoint,
+    cloud_doc:cloudDocId(),
+    user_key:notificationUserKey(),
+    user_role:String(state.user.role||""),
+    device_id:DEVICE_ID,
+    subscription:json,
+    enabled:true,
+    updated_at_client:Date.now()
+  };
+
+  await supabaseFetch(
+    NEXUS_PUSH_TABLE,
+    "on_conflict=endpoint",
+    {
+      method:"POST",
+      headers:supabaseHeaders("resolution=merge-duplicates,return=minimal"),
+      body:JSON.stringify(row)
+    },
+    18000
+  );
+
+  return true;
+}
+
+async function subscribeBackgroundPush(){
+  if(!pushSupported() || !state.user || !isReviewer()) return false;
+  if(Notification.permission!=="granted") return false;
+
+  const registration=await navigator.serviceWorker.ready;
+  let subscription=await registration.pushManager.getSubscription();
+
+  if(!subscription){
+    subscription=await registration.pushManager.subscribe({
+      userVisibleOnly:true,
+      applicationServerKey:vapidPublicKeyBytes(NEXUS_VAPID_PUBLIC_KEY)
+    });
+  }
+
+  await savePushSubscriptionToCloud(subscription);
+  return true;
+}
+
+async function syncExistingPushSubscription(){
+  if(!pushSupported() || !state.user || !isReviewer()) return false;
+  if(Notification.permission!=="granted") return false;
+
+  const registration=await navigator.serviceWorker.ready;
+  const subscription=await registration.pushManager.getSubscription();
+  if(!subscription) return false;
+
+  return savePushSubscriptionToCloud(subscription);
+}
+
+async function disableCurrentPushSubscription(){
+  if(!pushSupported() || !validCloudConfig()) return false;
+
+  const registration=await navigator.serviceWorker.ready;
+  const subscription=await registration.pushManager.getSubscription();
+  if(!subscription?.endpoint) return false;
+
+  await supabaseFetch(
+    NEXUS_PUSH_TABLE,
+    `endpoint=eq.${encodeURIComponent(subscription.endpoint)}`,
+    {
+      method:"PATCH",
+      headers:supabaseHeaders("return=minimal"),
+      body:JSON.stringify({
+        enabled:false,
+        updated_at_client:Date.now()
+      })
+    },
+    12000
+  );
+
+  return true;
+}
+
 function notificationPermissionText(){
-  if(!("Notification" in window)) return "No disponible en este navegador";
-  if(Notification.permission==="granted") return "Notificaciones del sistema activadas";
+  if(!pushSupported()) return "Notificaciones push no disponibles en este navegador";
+  if(Notification.permission==="granted") return "Notificaciones activadas, incluido segundo plano y app cerrada";
   if(Notification.permission==="denied") return "Notificaciones bloqueadas en el sistema";
-  return "Notificaciones del sistema sin activar";
+  return "Notificaciones sin activar";
 }
 async function requestAppNotifications(showFeedback=true){
-  if(!("Notification" in window)){
-    if(showFeedback) showNotice("Este navegador no ofrece notificaciones del sistema.","Notificaciones","!");
+  if(!pushSupported()){
+    if(showFeedback) showNotice(
+      "Este navegador no ofrece Web Push para NEXUS.",
+      "Notificaciones",
+      "!"
+    );
     return false;
   }
+
+  if(!state.user || !isReviewer()){
+    if(showFeedback) showNotice(
+      "Solo administradores y supervisores pueden activar estas notificaciones.",
+      "Notificaciones",
+      "!"
+    );
+    return false;
+  }
+
   try{
-    const permission=Notification.permission==="default" ? await Notification.requestPermission() : Notification.permission;
+    const permission=Notification.permission==="default"
+      ? await Notification.requestPermission()
+      : Notification.permission;
+
     if(permission==="granted"){
-      if(showFeedback) showNotice("Las notificaciones del sistema quedaron activadas.","Notificaciones","✓");
+      const subscribed=await subscribeBackgroundPush();
+
+      if(showFeedback){
+        showNotice(
+          subscribed
+            ? "Notificaciones activadas. NEXUS podrá avisarte también en segundo plano o con la PWA cerrada."
+            : "El permiso fue concedido, pero no se pudo registrar la suscripción push. Revisa la configuración del servicio push.",
+          "Notificaciones",
+          subscribed?"✓":"!"
+        );
+      }
+
       deliverRecentSystemNotifications();
-      return true;
+      return subscribed;
     }
-    if(showFeedback) showNotice("El permiso de notificaciones no está habilitado. Las alertas seguirán apareciendo dentro de NEXUS.","Notificaciones","!");
+
+    if(showFeedback) showNotice(
+      "El permiso de notificaciones no está habilitado. Las alertas seguirán apareciendo dentro de NEXUS.",
+      "Notificaciones",
+      "!"
+    );
     return false;
   }catch(e){
-    console.warn("Permiso de notificaciones falló:",e);
-    if(showFeedback) showNotice("No se pudo solicitar el permiso de notificaciones.","Notificaciones","!");
+    console.warn("Activación de Web Push falló:",e);
+    if(showFeedback) showNotice(
+      "No se pudo activar Web Push. Tus datos no fueron modificados.",
+      "Notificaciones",
+      "!"
+    );
     return false;
   }
 }
@@ -1150,12 +1303,14 @@ async function login(event=null){
   if(event && typeof event.preventDefault==="function") event.preventDefault();
   if(state.loginBusy) return false;
 
+  captureLoginDraft();
+
   const usernameInput=document.getElementById("username");
   const passwordInput=document.getElementById("password");
   if(!usernameInput || !passwordInput) return false;
 
-  const username=normalizeLoginUsername(usernameInput.value);
-  const password=String(passwordInput.value??"");
+  const username=normalizeLoginUsername(state.loginUsernameDraft);
+  const password=String(state.loginPasswordDraft??"");
 
   if(!username){
     setLoginMessage("Escribe el nombre de usuario.","error");
@@ -1175,11 +1330,10 @@ async function login(event=null){
 
   try{
     const freshness=await ensureLoginDataFresh();
-
     const found=findLoginUser(username);
 
     if(!found || String(found.password??"")!==password){
-      // Un intento fallido nunca modifica users, tablas, registros ni Supabase.
+      state.loginPasswordDraft="";
       passwordInput.value="";
       setLoginMessage(
         freshness.online && !freshness.fresh
@@ -1198,12 +1352,16 @@ async function login(event=null){
     state.pendingOnly=false;
     state.loginMessage="";
     state.loginMessageType="";
+    state.loginUsernameDraft="";
+    state.loginPasswordDraft="";
+    state.loginPasswordVisible=false;
 
     localStorage.setItem(SESSION_KEY,JSON.stringify(found));
 
     render();
-    updateAppBadge();
-    deliverRecentSystemNotifications();
+    syncExistingPushSubscription().catch(e=>
+      console.warn("No se pudo reasociar la suscripción push:",e)
+    );
     scheduleCloudRefresh("login",60,true,true);
     return true;
   }catch(e){
@@ -1216,10 +1374,12 @@ async function login(event=null){
   }finally{
     state.loginBusy=false;
     setLoginBusy(false);
+    restoreLoginDraftToDOM();
   }
 }
 
 function clearLoginErrorOnInput(){
+  captureLoginDraft();
   if(state.loginMessage){
     state.loginMessage="";
     state.loginMessageType="";
@@ -1228,6 +1388,10 @@ function clearLoginErrorOnInput(){
 }
 
 function logout(){
+  disableCurrentPushSubscription().catch(e=>
+    console.warn("No se pudo desactivar la suscripción push al cerrar sesión:",e)
+  );
+
   localStorage.removeItem(SESSION_KEY);
   state.user=null;
   state.view="home";
@@ -1237,9 +1401,9 @@ function logout(){
   state.loginBusy=false;
   state.loginMessage="";
   state.loginMessageType="";
-  state.notificationsOpen=false;
-  state.alertCreateOpen=false;
-  clearAppBadgeOnly();
+  state.loginUsernameDraft="";
+  state.loginPasswordDraft="";
+  state.loginPasswordVisible=false;
   render();
 }
 
@@ -1553,7 +1717,7 @@ function summaryTankHTML(a,c){let l=level(a,c),w=l.step*25;return `<div class="t
 function normalizeLoginUsername(value){
   let username=String(value??"");
   try{ username=username.normalize("NFKC"); }catch(e){}
-  return username.trim().toLowerCase();
+  return username.trim();
 }
 
 function sameUserIdentity(a,b){
@@ -1678,22 +1842,112 @@ function handleLoginKeydown(event){
   }
 }
 
+
+function captureLoginDraft(){
+  if(state.user) return;
+  const username=document.getElementById("username");
+  const password=document.getElementById("password");
+  if(username) state.loginUsernameDraft=String(username.value??"");
+  if(password) state.loginPasswordDraft=String(password.value??"");
+}
+
+function restoreLoginDraftToDOM(){
+  if(state.user) return;
+  const username=document.getElementById("username");
+  const password=document.getElementById("password");
+  if(username && username.value!==state.loginUsernameDraft){
+    username.value=state.loginUsernameDraft||"";
+  }
+  if(password){
+    password.type=state.loginPasswordVisible?"text":"password";
+    if(password.value!==state.loginPasswordDraft){
+      password.value=state.loginPasswordDraft||"";
+    }
+  }
+
+  const eye=document.querySelector('.password-eye[aria-controls="password"]');
+  if(eye){
+    eye.classList.toggle("visible",!!state.loginPasswordVisible);
+    eye.setAttribute(
+      "aria-label",
+      state.loginPasswordVisible?"Ocultar contraseña":"Mostrar contraseña"
+    );
+    eye.title=state.loginPasswordVisible?"Ocultar contraseña":"Mostrar contraseña";
+  }
+}
+
+function isLoginDraftActive(){
+  if(state.user) return false;
+  captureLoginDraft();
+  return !!(
+    state.loginUsernameDraft ||
+    state.loginPasswordDraft ||
+    state.loginBusy
+  );
+}
+
 function passwordEyeButtonHTML(inputId){
-  return `<button type="button" class="password-eye" onclick="togglePasswordVisibility('${inputId}',this)" aria-label="Mostrar contraseña" title="Mostrar contraseña">
+  return `<button
+    type="button"
+    class="password-eye"
+    aria-controls="${inputId}"
+    onpointerdown="event.preventDefault();event.stopPropagation()"
+    onclick="togglePasswordVisibility('${inputId}',this,event)"
+    aria-label="Mostrar contraseña"
+    title="Mostrar contraseña"
+  >
     <svg class="eye-open" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path><circle cx="12" cy="12" r="3"></circle></svg>
     <svg class="eye-off" viewBox="0 0 24 24" aria-hidden="true"><path d="m3 3 18 18"></path><path d="M10.6 6.2A10.7 10.7 0 0 1 12 6c6.5 0 10 6 10 6a17 17 0 0 1-2.1 2.8"></path><path d="M6.2 6.2C3.4 8 2 12 2 12s3.5 6 10 6c1.7 0 3.1-.4 4.4-1"></path><path d="M10.7 10.7a3 3 0 0 0 4.2 4.2"></path></svg>
   </button>`;
 }
-function togglePasswordVisibility(inputId,button){
+function togglePasswordVisibility(inputId,button,event=null){
+  if(event){
+    event.preventDefault();
+    event.stopPropagation();
+  }
+
+  captureLoginDraft();
+
   const input=document.getElementById(inputId);
-  if(!input) return;
+  if(!input) return false;
+
+  const currentValue=String(input.value??"");
+  const usernameValue=String(document.getElementById("username")?.value??"");
+  const selectionStart=input.selectionStart;
+  const selectionEnd=input.selectionEnd;
   const show=input.type==="password";
+
+  if(inputId==="password"){
+    state.loginUsernameDraft=usernameValue;
+    state.loginPasswordDraft=currentValue;
+    state.loginPasswordVisible=show;
+  }
+
   input.type=show?"text":"password";
+  input.value=currentValue;
+
+  const username=document.getElementById("username");
+  if(username) username.value=usernameValue;
+
   if(button){
     button.classList.toggle("visible",show);
     button.setAttribute("aria-label",show?"Ocultar contraseña":"Mostrar contraseña");
     button.title=show?"Ocultar contraseña":"Mostrar contraseña";
   }
+
+  requestAnimationFrame(()=>{
+    const current=document.getElementById(inputId);
+    if(!current) return;
+    current.value=currentValue;
+    try{
+      current.focus({preventScroll:true});
+      if(selectionStart!==null && selectionEnd!==null){
+        current.setSelectionRange(selectionStart,selectionEnd);
+      }
+    }catch(e){}
+  });
+
+  return false;
 }
 
 function loginHTML(){
@@ -1717,7 +1971,7 @@ function loginHTML(){
         autocorrect="off"
         spellcheck="false"
         enterkeyhint="next"
-        oninput="clearLoginErrorOnInput()"
+        oninput="captureLoginDraft();clearLoginErrorOnInput()"
         onkeydown="handleLoginKeydown(event)"
       >
 
@@ -1726,14 +1980,14 @@ function loginHTML(){
         <input
           id="password"
           name="password"
-          type="password"
+          type="${state.loginPasswordVisible?"text":"password"}"
           placeholder="Contraseña"
           autocomplete="current-password"
           autocapitalize="none"
           autocorrect="off"
           spellcheck="false"
           enterkeyhint="go"
-          oninput="clearLoginErrorOnInput()"
+          oninput="captureLoginDraft();clearLoginErrorOnInput()"
           onkeydown="handleLoginKeydown(event)"
         >
         ${passwordEyeButtonHTML("password")}
@@ -1832,7 +2086,7 @@ function createUser(){
     showFieldError("newUsername", "Campo no puede estar vacío");
     hasError = true;
   }
-  if(username && users.some(u => String(u.username||"").trim().toLowerCase() === username)){
+  if(username && users.some(u => normalizeLoginUsername(u.username)===username)){
     showFieldError("newUsername", "Ese usuario ya existe");
     hasError = true;
   }
@@ -1870,15 +2124,17 @@ function createUser(){
 }
 function openUserEditModal(username){
   const target=users.find(x=>
-    String(x?.username||"").trim().toLowerCase()===
-    String(username||"").trim().toLowerCase()
+    normalizeLoginUsername(x?.username)===
+    normalizeLoginUsername(username)
   );
   if(!target) return;
 
   if(!canEditUser(target)){
     showNotice(
-      "Solo el administrador principal puede modificar este usuario.",
-      "Administrador principal",
+      isPrimaryAdmin(target)
+        ? "El administrador principal solo puede modificarse desde su propia sesión."
+        : "Este administrador solo puede modificarse a sí mismo o ser modificado por el administrador principal.",
+      "Acción no permitida",
       "!"
     );
     return;
@@ -1899,9 +2155,9 @@ function saveUserEditModal(){
   if(state.userMutationBusy) return;
 
   users=filterDeletedUsers(users);
-  const originalUsername=String(state.userEditUsername||"").trim().toLowerCase();
+  const originalUsername=normalizeLoginUsername(state.userEditUsername);
   const u=users.find(x=>
-    String(x.username||"").trim().toLowerCase()===originalUsername
+    normalizeLoginUsername(x.username)===originalUsername
   );
   if(!u) return;
 
@@ -1934,7 +2190,7 @@ function saveUserEditModal(){
   }
 
   if(users.some(x=>{
-    const current=String(x.username||"").trim().toLowerCase();
+    const current=normalizeLoginUsername(x.username);
     return x!==u && current===username;
   })){
     showNotice(
@@ -1983,12 +2239,12 @@ function saveUserEditModal(){
 
   const activeSameUser=
     (primary && isPrimaryAdmin(state.user)) ||
-    String(state.user?.username||"").trim().toLowerCase()===originalUsername;
+    normalizeLoginUsername(state.user?.username)===originalUsername;
 
   if(activeSameUser){
     state.user=primary
       ? users.find(isPrimaryAdmin)
-      : users.find(x=>String(x.username||"").trim().toLowerCase()===username);
+      : users.find(x=>normalizeLoginUsername(x.username)===username);
 
     if(state.user){
       localStorage.setItem(SESSION_KEY,JSON.stringify(state.user));
@@ -2003,8 +2259,8 @@ function saveUserEditModal(){
 }
 function deleteUser(username){
   const u=users.find(x=>
-    String(x?.username||"").trim().toLowerCase()===
-    String(username||"").trim().toLowerCase()
+    normalizeLoginUsername(x?.username)===
+    normalizeLoginUsername(username)
   );
   if(!u) return;
 
@@ -2019,8 +2275,8 @@ function deleteUser(username){
 
   if(!canDeleteUser(u)){
     const activeSame=
-      String(state.user?.username||"").trim().toLowerCase()===
-      String(u.username||"").trim().toLowerCase();
+      normalizeLoginUsername(state.user?.username)===
+      normalizeLoginUsername(u.username);
 
     showNotice(
       activeSame
@@ -2045,8 +2301,8 @@ function deleteUserNow(payload,deleteAssociatedTable=false){
   const username=typeof payload==="object" ? payload.username : payload;
   const account=typeof payload==="object" ? payload.account : "";
   const u=users.find(x=>
-    String(x?.username||"").trim().toLowerCase()===
-    String(username||"").trim().toLowerCase()
+    normalizeLoginUsername(x?.username)===
+    normalizeLoginUsername(username)
   );
   if(!u) return;
 
@@ -2146,8 +2402,8 @@ function userCreateModalHTML(){
 function userEditModalHTML(){
   if(!state.userEditOpen || !state.userEditUsername) return "";
   const u=users.find(x=>
-    String(x?.username||"").trim().toLowerCase()===
-    String(state.userEditUsername||"").trim().toLowerCase()
+    normalizeLoginUsername(x?.username)===
+    normalizeLoginUsername(state.userEditUsername)
   );
   if(!u || !canEditUser(u)) return "";
 
@@ -2925,7 +3181,7 @@ function isModalFormOpen(){
   );
 }
 function shouldDeferCloudRender(){
-  return isFormEditing() || isModalFormOpen();
+  return isFormEditing() || isModalFormOpen() || isLoginDraftActive();
 }
 function setupInputFocusGuards(){
   if(window.__nexusInputGuardsReady) return;
@@ -2968,16 +3224,25 @@ function persistAllLocal(){
 
 /* Bloque anterior eliminado: Supabase se define al final. */
 function nexusRender(){
-  const pos = document.querySelector('.tablewrap') ? getScrollState() : (state.keepTableScrollOnce ? state.lastTableScroll : null);
+  if(!state.user) captureLoginDraft();
+
+  const pos=document.querySelector('.tablewrap')
+    ? getScrollState()
+    : (state.keepTableScrollOnce ? state.lastTableScroll : null);
+
   applySettings();
   document.getElementById("root").innerHTML=state.user?shellHTML():loginHTML();
   applySettings();
+
+  if(!state.user) restoreLoginDraftToDOM();
+
   if(pos && state.view==="table"){
     restoreScrollState(pos);
   }
+
   updateSyncDotVisual();
   updateAppBadge();
-  state.keepTableScrollOnce = false;
+  state.keepTableScrollOnce=false;
 }
 
 const NEXUS_APPLIED_OPS_KEY = "nexus_applied_ops_v1";
@@ -3748,8 +4013,17 @@ async function refreshCloudNow(reason="manual",renderAfter=true,force=false){
 function setupNotificationOpenListener(){
   if(window.__nexusNotificationOpenListenerReady) return;
   window.__nexusNotificationOpenListenerReady=true;
+
   navigator.serviceWorker?.addEventListener("message",event=>{
-    if(event.data?.type==="NEXUS_NOTIFICATION_OPEN" && isReviewer()) openNotificationsPanel();
+    if(event.data?.type==="NEXUS_NOTIFICATION_OPEN" && isReviewer()){
+      scheduleCloudRefresh("notification-open",0,true,true);
+      openNotificationsPanel();
+      return;
+    }
+
+    if(event.data?.type==="NEXUS_PUSH_RECEIVED"){
+      scheduleCloudRefresh("push-received",0,true,true);
+    }
   });
 }
 

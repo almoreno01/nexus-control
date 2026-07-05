@@ -1,4 +1,4 @@
-const CACHE_NAME = "nexus-pwa-alerts-notifications-v14";
+const CACHE_NAME = "nexus-pwa-web-push-login-v15";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -69,4 +69,55 @@ self.addEventListener("notificationclick", event => {
       return self.clients.openWindow ? self.clients.openWindow(target) : undefined;
     })
   );
+});
+
+
+self.addEventListener("push", event => {
+  let payload = {};
+  try{
+    payload = event.data ? event.data.json() : {};
+  }catch(e){
+    payload = {
+      title:"NEXUS",
+      body:event.data ? event.data.text() : "Nueva alerta"
+    };
+  }
+
+  const title = payload.title || "NEXUS · Alerta de nivel";
+  const options = {
+    body: payload.body || "Una tabla alcanzó el nivel configurado.",
+    tag: payload.tag || payload.notificationId || "nexus-alert",
+    icon: payload.icon || "./icons/icon-192.png",
+    badge: payload.badge || "./icons/icon-192.png",
+    data: {
+      url: payload.url || "./",
+      notificationId: payload.notificationId || ""
+    }
+  };
+
+  event.waitUntil((async () => {
+    await self.registration.showNotification(title, options);
+
+    try{
+      const count = Number(payload.badgeCount || 0);
+      if(self.navigator && typeof self.navigator.setAppBadge === "function"){
+        if(count > 0) await self.navigator.setAppBadge(count);
+        else if(typeof self.navigator.clearAppBadge === "function"){
+          await self.navigator.clearAppBadge();
+        }
+      }
+    }catch(e){}
+
+    const clients = await self.clients.matchAll({
+      type:"window",
+      includeUncontrolled:true
+    });
+
+    clients.forEach(client => {
+      client.postMessage({
+        type:"NEXUS_PUSH_RECEIVED",
+        payload
+      });
+    });
+  })());
 });

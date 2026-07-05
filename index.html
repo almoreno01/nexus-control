@@ -936,30 +936,27 @@ async function savePushSubscriptionToCloud(subscription){
   const endpoint=String(json?.endpoint||subscription.endpoint||"");
   if(!endpoint) throw new Error("ENDPOINT_PUSH_VACIO");
 
-  const row={
-    endpoint,
-    cloud_doc:cloudDocId(),
-    user_key:notificationUserKey(),
-    user_role:String(state.user.role||""),
-    device_id:DEVICE_ID,
-    subscription:json,
-    enabled:true,
-    updated_at_client:Date.now()
-  };
-
   try{
     await supabaseFetch(
-      NEXUS_PUSH_TABLE,
-      "on_conflict=endpoint",
+      "rpc/nexus_register_push_subscription",
+      "",
       {
         method:"POST",
-        headers:supabaseHeaders("resolution=merge-duplicates,return=minimal"),
-        body:JSON.stringify(row)
+        headers:supabaseHeaders("return=minimal"),
+        body:JSON.stringify({
+          p_endpoint:endpoint,
+          p_cloud_doc:cloudDocId(),
+          p_user_key:notificationUserKey(),
+          p_user_role:String(state.user.role||""),
+          p_device_id:DEVICE_ID,
+          p_subscription:json,
+          p_updated_at_client:Date.now()
+        })
       },
       18000
     );
   }catch(e){
-    e.nexusPushStage="guardar-en-supabase";
+    e.nexusPushStage="guardar-en-supabase-rpc";
     throw e;
   }
 
@@ -1022,23 +1019,28 @@ async function syncExistingPushSubscription(){
 async function disableCurrentPushSubscription(){
   if(!pushSupported() || !validCloudConfig()) return false;
 
-  const registration=await navigator.serviceWorker.ready;
+  const registration=await ensurePushServiceWorker();
   const subscription=await registration.pushManager.getSubscription();
   if(!subscription?.endpoint) return false;
 
-  await supabaseFetch(
-    NEXUS_PUSH_TABLE,
-    `endpoint=eq.${encodeURIComponent(subscription.endpoint)}`,
-    {
-      method:"PATCH",
-      headers:supabaseHeaders("return=minimal"),
-      body:JSON.stringify({
-        enabled:false,
-        updated_at_client:Date.now()
-      })
-    },
-    12000
-  );
+  try{
+    await supabaseFetch(
+      "rpc/nexus_disable_push_subscription",
+      "",
+      {
+        method:"POST",
+        headers:supabaseHeaders("return=minimal"),
+        body:JSON.stringify({
+          p_endpoint:String(subscription.endpoint),
+          p_updated_at_client:Date.now()
+        })
+      },
+      12000
+    );
+  }catch(e){
+    console.warn("No se pudo desactivar la suscripción Push:",e);
+    return false;
+  }
 
   return true;
 }

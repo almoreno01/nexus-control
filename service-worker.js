@@ -1,4 +1,4 @@
-const CACHE_NAME = "nexus-pwa-login-robusto-v13";
+const CACHE_NAME = "nexus-pwa-alerts-notifications-v14";
 const APP_ASSETS = [
   "./",
   "./index.html",
@@ -51,5 +51,22 @@ self.addEventListener("fetch", event => {
       caches.open(CACHE_NAME).then(cache => cache.put(req, copy));
       return res;
     }))
+  );
+});
+
+
+self.addEventListener("notificationclick", event => {
+  event.notification.close();
+  const target = event.notification?.data?.url || "./";
+  event.waitUntil(
+    self.clients.matchAll({type:"window", includeUncontrolled:true}).then(clients => {
+      for(const client of clients){
+        if("focus" in client){
+          client.postMessage({type:"NEXUS_NOTIFICATION_OPEN"});
+          return client.focus();
+        }
+      }
+      return self.clients.openWindow ? self.clients.openWindow(target) : undefined;
+    })
   );
 });

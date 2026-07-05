@@ -35,6 +35,28 @@
 .login-card button:disabled{opacity:.62;cursor:wait}
 .login-card input:disabled{opacity:.72}
 
+
+.confirm-note-col{min-width:220px;width:220px}
+.confirm-note-input{width:100%;min-width:190px;padding:8px 10px;border-radius:9px;font-size:.88rem}
+.notification-bell{position:relative;width:42px;height:42px;min-width:42px;padding:0;border-radius:13px;display:flex;align-items:center;justify-content:center;background:var(--card);color:var(--text);border:1px solid var(--line);box-shadow:none}
+.notification-bell svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.notification-badge{position:absolute;right:-5px;top:-5px;min-width:20px;height:20px;padding:0 5px;border-radius:999px;background:#c83d4f;color:#fff;border:2px solid var(--bg);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:900;line-height:1}
+.notifications-screen,.alert-modal-screen{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:18px}
+.notifications-panel,.alert-modal{width:min(620px,100%);max-height:min(78vh,720px);overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:20px;box-shadow:0 24px 80px rgba(0,0,0,.24)}
+.notifications-head,.alerts-settings-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.notifications-list{display:grid;gap:10px;margin-top:14px}
+.notification-item{border:1px solid var(--line);border-radius:14px;padding:13px;background:var(--bg)}
+.notification-title{font-weight:900;margin-bottom:5px}
+.notification-meta{font-size:.78rem;color:var(--muted);margin-top:7px}
+.alerts-settings{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+.alert-list{display:grid;gap:9px;margin-top:12px}
+.alert-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--line);border-radius:14px}
+.alert-item-main{min-width:0}
+.alert-item-title{font-weight:900}
+.alert-item-sub{color:var(--muted);font-size:.8rem;margin-top:3px}
+.notification-permission{margin-top:10px;padding:10px 12px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
+@media(max-width:700px){.confirm-note-col{min-width:180px;width:180px}.confirm-note-input{min-width:155px}.notification-bell{width:40px;height:40px;min-width:40px}.notifications-screen,.alert-modal-screen{align-items:flex-end;padding:10px}.notifications-panel,.alert-modal{max-height:86vh;border-radius:22px 22px 14px 14px}}
+
 </style></head><body><div id="root"></div>
 <script src="./supabase-config.js"></script>
 <script>
@@ -158,8 +180,16 @@ const OFFLINE_OPS_KEY = "nexus_offline_ops_v1";
 const DELETED_RECORDS_KEY = "nexus_deleted_records_v1";
 const DELETED_USERS_KEY = "nexus_deleted_users_v1";
 const USERS_UPDATED_AT_KEY = "nexus_users_updated_at_v1";
+const ALERTS_KEY = "nexus_alerts_v1";
+const APP_NOTIFICATIONS_KEY = "nexus_app_notifications_v1";
+const ALERT_STATES_KEY = "nexus_alert_states_v1";
+const SHOWN_SYSTEM_NOTIFICATIONS_KEY = "nexus_shown_system_notifications_v1";
 let deletedUsers = JSON.parse(localStorage.getItem(DELETED_USERS_KEY) || "[]");
 let localUsersUpdatedAt = Number(localStorage.getItem(USERS_UPDATED_AT_KEY) || 0);
+let alertConfigs = JSON.parse(localStorage.getItem(ALERTS_KEY) || "[]");
+let appNotifications = JSON.parse(localStorage.getItem(APP_NOTIFICATIONS_KEY) || "[]");
+let alertStates = JSON.parse(localStorage.getItem(ALERT_STATES_KEY) || "{}");
+let shownSystemNotifications = JSON.parse(localStorage.getItem(SHOWN_SYSTEM_NOTIFICATIONS_KEY) || "{}");
 
 function markUsersChanged(){
   localUsersUpdatedAt=Date.now();
@@ -318,7 +348,9 @@ let state = {
   menuReturn:null,
   loginBusy:false,
   loginMessage:"",
-  loginMessageType:""
+  loginMessageType:"",
+  notificationsOpen:false,
+  alertCreateOpen:false
 };
 function settings(){
   let d={appearance:"light",fontSize:"normal",coverageQty:1,coverageUnit:"dia",avgQty:30,avgUnit:"dia",lookbackDays:30};
@@ -362,6 +394,7 @@ function normalizeRecord(r){
   if(!r.id) r.id=newRecordId();
   if(!r._updatedAt) r._updatedAt=Date.now();
   if(!r._clientId) r._clientId=DEVICE_ID;
+  if(typeof r.confirmationNote!=="string") r.confirmationNote=String(r.confirmationNote||"");
   return r;
 }
 function normalizeAllRecords(){
@@ -707,6 +740,318 @@ function level(a,c){
   let step=pct>=75?4:pct>=50?3:pct>=25?2:1;
   return {pct:pct,step:step,cls:step===4?"ok":step===1?"low":"mid",label:step===4?"Bien":step===1?"Bajo":"Medio"};
 }
+
+function isReviewer(user=state.user){
+  return !!user && (user.role==="administrador" || user.role==="supervisor");
+}
+function notificationUserKey(user=state.user){
+  if(!user) return "";
+  if(isPrimaryAdmin(user)) return PRIMARY_ADMIN_ID;
+  return String(user.userId||"") || `username:${normalizeLoginUsername(user.username)}`;
+}
+function normalizeAlertConfig(alert){
+  if(!alert || !alert.id) return null;
+  return {
+    ...alert,
+    id:String(alert.id),
+    account:String(alert.account||"").trim(),
+    threshold:Math.max(1,Math.min(100,Number(alert.threshold)||25)),
+    createdAt:Number(alert.createdAt||alert.updatedAt||Date.now()),
+    updatedAt:Number(alert.updatedAt||alert.createdAt||Date.now()),
+    deleted:!!alert.deleted
+  };
+}
+function mergeAlertConfigs(localList=[],remoteList=[]){
+  const map=new Map();
+  const put=(raw,priority)=>{
+    const alert=normalizeAlertConfig(raw);
+    if(!alert) return;
+    const old=map.get(alert.id);
+    if(!old || alert.updatedAt>old.alert.updatedAt || (alert.updatedAt===old.alert.updatedAt && priority>=old.priority)){
+      map.set(alert.id,{alert,priority});
+    }
+  };
+  (remoteList||[]).forEach(a=>put(a,1));
+  (localList||[]).forEach(a=>put(a,2));
+  return [...map.values()].map(x=>x.alert).sort((a,b)=>b.createdAt-a.createdAt).slice(0,200);
+}
+function normalizeAppNotification(item){
+  if(!item || !item.id) return null;
+  return {
+    ...item,
+    id:String(item.id),
+    alertId:String(item.alertId||""),
+    account:String(item.account||""),
+    currency:String(item.currency||""),
+    threshold:Number(item.threshold||0),
+    pct:Number(item.pct||0),
+    amount:Number(item.amount||0),
+    createdAt:Number(item.createdAt||Date.now()),
+    updatedAt:Number(item.updatedAt||item.createdAt||Date.now()),
+    readBy:[...new Set((Array.isArray(item.readBy)?item.readBy:[]).map(String).filter(Boolean))]
+  };
+}
+function mergeAppNotifications(localList=[],remoteList=[]){
+  const map=new Map();
+  const put=(raw,priority)=>{
+    const item=normalizeAppNotification(raw);
+    if(!item) return;
+    const old=map.get(item.id);
+    if(!old){ map.set(item.id,{item,priority}); return; }
+    const newer=item.updatedAt>old.item.updatedAt || (item.updatedAt===old.item.updatedAt && priority>=old.priority) ? item : old.item;
+    const readBy=[...new Set([...(old.item.readBy||[]),...(item.readBy||[])])];
+    map.set(item.id,{item:{...newer,readBy,updatedAt:Math.max(old.item.updatedAt,item.updatedAt)},priority:Math.max(old.priority,priority)});
+  };
+  (remoteList||[]).forEach(n=>put(n,1));
+  (localList||[]).forEach(n=>put(n,2));
+  return [...map.values()].map(x=>x.item).sort((a,b)=>b.createdAt-a.createdAt).slice(0,300);
+}
+function mergeAlertStates(localStates={},remoteStates={}){
+  const out={};
+  const put=(key,value,priority)=>{
+    if(!key || !value) return;
+    const stateValue={...value,updatedAt:Number(value.updatedAt||0),_priority:priority};
+    const old=out[key];
+    if(!old || stateValue.updatedAt>old.updatedAt || (stateValue.updatedAt===old.updatedAt && priority>=old._priority)) out[key]=stateValue;
+  };
+  Object.entries(remoteStates||{}).forEach(([k,v])=>put(k,v,1));
+  Object.entries(localStates||{}).forEach(([k,v])=>put(k,v,2));
+  Object.keys(out).forEach(k=>delete out[k]._priority);
+  return out;
+}
+function saveAlertNotificationLocal(){
+  alertConfigs=mergeAlertConfigs(alertConfigs,[]);
+  appNotifications=mergeAppNotifications(appNotifications,[]);
+  localStorage.setItem(ALERTS_KEY,JSON.stringify(alertConfigs));
+  localStorage.setItem(APP_NOTIFICATIONS_KEY,JSON.stringify(appNotifications));
+  localStorage.setItem(ALERT_STATES_KEY,JSON.stringify(alertStates||{}));
+  localStorage.setItem(SHOWN_SYSTEM_NOTIFICATIONS_KEY,JSON.stringify(shownSystemNotifications||{}));
+}
+function activeAlerts(){ return alertConfigs.filter(a=>!a.deleted && a.account); }
+function currentNotifications(){ return isReviewer()?appNotifications.slice().sort((a,b)=>b.createdAt-a.createdAt):[]; }
+function unreadNotificationCount(){
+  if(!isReviewer()) return 0;
+  const key=notificationUserKey();
+  if(!key) return 0;
+  return currentNotifications().filter(n=>!(n.readBy||[]).includes(key)).length;
+}
+async function updateAppBadge(){
+  const count=unreadNotificationCount();
+  try{
+    if(count>0 && typeof navigator.setAppBadge==="function") await navigator.setAppBadge(count);
+    else if(count===0 && typeof navigator.clearAppBadge==="function") await navigator.clearAppBadge();
+  }catch(e){ console.warn("No se pudo actualizar el badge de NEXUS:",e); }
+}
+function clearAppBadgeOnly(){
+  try{ if(typeof navigator.clearAppBadge==="function") navigator.clearAppBadge().catch(()=>{}); }catch(e){}
+}
+function notificationBellHTML(){
+  if(!isReviewer()) return "";
+  const count=unreadNotificationCount();
+  return `<button class="notification-bell" onclick="openNotificationsPanel()" title="Notificaciones" aria-label="Notificaciones">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>
+    ${count?`<span class="notification-badge">${count>99?"99+":count}</span>`:""}
+  </button>`;
+}
+function notificationPermissionText(){
+  if(!("Notification" in window)) return "No disponible en este navegador";
+  if(Notification.permission==="granted") return "Notificaciones del sistema activadas";
+  if(Notification.permission==="denied") return "Notificaciones bloqueadas en el sistema";
+  return "Notificaciones del sistema sin activar";
+}
+async function requestAppNotifications(showFeedback=true){
+  if(!("Notification" in window)){
+    if(showFeedback) showNotice("Este navegador no ofrece notificaciones del sistema.","Notificaciones","!");
+    return false;
+  }
+  try{
+    const permission=Notification.permission==="default" ? await Notification.requestPermission() : Notification.permission;
+    if(permission==="granted"){
+      if(showFeedback) showNotice("Las notificaciones del sistema quedaron activadas.","Notificaciones","✓");
+      deliverRecentSystemNotifications();
+      return true;
+    }
+    if(showFeedback) showNotice("El permiso de notificaciones no está habilitado. Las alertas seguirán apareciendo dentro de NEXUS.","Notificaciones","!");
+    return false;
+  }catch(e){
+    console.warn("Permiso de notificaciones falló:",e);
+    if(showFeedback) showNotice("No se pudo solicitar el permiso de notificaciones.","Notificaciones","!");
+    return false;
+  }
+}
+function notificationBody(item){
+  return `${item.account} · ${item.currency}: nivel ${item.pct}% (alerta ${item.threshold}%). Saldo ${money(item.amount)} ${item.currency}.`;
+}
+async function showSystemNotification(item){
+  if(!item || !isReviewer() || !("Notification" in window) || Notification.permission!=="granted") return false;
+  if(shownSystemNotifications[item.id]) return false;
+  try{
+    const registration=await navigator.serviceWorker?.ready;
+    if(!registration || typeof registration.showNotification!=="function") return false;
+    await registration.showNotification("NEXUS · Alerta de nivel",{
+      body:notificationBody(item),
+      tag:item.id,
+      icon:"./icons/icon-192.png",
+      badge:"./icons/icon-192.png",
+      data:{url:"./"}
+    });
+    shownSystemNotifications[item.id]=Date.now();
+    const keys=Object.keys(shownSystemNotifications);
+    if(keys.length>500){
+      keys.sort((a,b)=>Number(shownSystemNotifications[a])-Number(shownSystemNotifications[b]));
+      keys.slice(0,keys.length-300).forEach(k=>delete shownSystemNotifications[k]);
+    }
+    saveAlertNotificationLocal();
+    return true;
+  }catch(e){ console.warn("No se pudo mostrar la notificación del sistema:",e); return false; }
+}
+async function deliverRecentSystemNotifications(){
+  if(!isReviewer()) return;
+  const key=notificationUserKey();
+  const cutoff=Date.now()-10*60*1000;
+  const pending=currentNotifications().filter(n=>n.createdAt>=cutoff && !(n.readBy||[]).includes(key) && !shownSystemNotifications[n.id]);
+  for(const item of pending.slice().reverse()) await showSystemNotification(item);
+}
+function alertStateKey(alert,currency){ return `${alert.id}|${currency}`; }
+function latestAccountRecordStamp(account,currency){
+  return rows(account,currency).reduce((max,r)=>Math.max(max,Number(r._updatedAt||0)),0) || Date.now();
+}
+function createThresholdNotification(alert,currency,pct){
+  const stamp=latestAccountRecordStamp(alert.account,currency);
+  const id=`level_${String(alert.id).replace(/[^a-zA-Z0-9_-]/g,"_")}_${currency}_${alert.threshold}_${stamp}`;
+  const item=normalizeAppNotification({
+    id,
+    alertId:alert.id,
+    account:alert.account,
+    currency,
+    threshold:alert.threshold,
+    pct,
+    amount:balance(alert.account,currency),
+    createdAt:Date.now(),
+    updatedAt:Date.now(),
+    readBy:[]
+  });
+  appNotifications=mergeAppNotifications(appNotifications,[item]);
+  return item;
+}
+function evaluateAlertThresholds({deliver=true}={}){
+  let generated=[];
+  const now=Date.now();
+  activeAlerts().forEach(alert=>{
+    ["CUP","USD"].forEach(currency=>{
+      const pct=level(alert.account,currency).pct;
+      const key=alertStateKey(alert,currency);
+      const previous=alertStates[key]||null;
+      const below=pct<=alert.threshold;
+      if(below && !previous?.below) generated.push(createThresholdNotification(alert,currency,pct));
+      alertStates[key]={below,lastPct:pct,updatedAt:now};
+    });
+  });
+  if(generated.length){
+    saveAlertNotificationLocal();
+    updateAppBadge();
+    if(deliver && isReviewer()) generated.forEach(item=>showSystemNotification(item));
+  }else{
+    localStorage.setItem(ALERT_STATES_KEY,JSON.stringify(alertStates||{}));
+  }
+  return generated.length;
+}
+function markAllNotificationsRead(saveCloud=true){
+  if(!isReviewer()) return;
+  const key=notificationUserKey();
+  if(!key) return;
+  let changed=false;
+  const now=Date.now();
+  appNotifications=appNotifications.map(item=>{
+    if((item.readBy||[]).includes(key)) return item;
+    changed=true;
+    return {...item,readBy:[...(item.readBy||[]),key],updatedAt:now};
+  });
+  if(changed){
+    saveAlertNotificationLocal();
+    updateAppBadge();
+    if(saveCloud) saveCloudDebounced();
+  }
+}
+function openNotificationsPanel(){
+  if(!isReviewer()) return;
+  markAllNotificationsRead(false);
+  state.notificationsOpen=true;
+  state.drawer=false;
+  render();
+  updateAppBadge();
+  saveCloudDebounced();
+}
+function closeNotificationsPanel(){ state.notificationsOpen=false; renderKeepScroll(); }
+function notificationsPanelHTML(){
+  if(!state.notificationsOpen || !isReviewer()) return "";
+  const list=currentNotifications();
+  return `<div class="notifications-screen" onclick="if(event.target===this)closeNotificationsPanel()"><div class="notifications-panel">
+    <div class="notifications-head"><div><h3 style="margin:0">Notificaciones</h3><div class="smalltxt">Alertas de nivel de las tablas</div></div><button class="secondary" onclick="closeNotificationsPanel()">Cerrar</button></div>
+    <div class="notifications-list">${list.length?list.map(n=>`<div class="notification-item"><div class="notification-title">${escText(n.account)} · ${escText(n.currency)} · ${n.pct}%</div><div>${escText(notificationBody(n))}</div><div class="notification-meta">${new Date(n.createdAt).toLocaleString("es-ES")}</div></div>`).join(""):'<div class="smalltxt">No hay notificaciones.</div>'}</div>
+  </div></div>`;
+}
+function alertsSettingsHTML(){
+  if(!isReviewer()) return "";
+  const list=activeAlerts();
+  return `<div class="alerts-settings">
+    <div class="alerts-settings-head"><div><h3 style="margin:0">Alertas</h3><div class="smalltxt">Avisa cuando una tabla alcanza o baja del nivel configurado. Se revisan CUP y USD.</div></div><button class="green" onclick="openAlertCreateModal()">Añadir alerta</button></div>
+    <div class="notification-permission"><div class="smalltxt">${escText(notificationPermissionText())}</div><button class="secondary" style="margin-top:8px" onclick="requestAppNotifications(true)">Activar notificaciones</button></div>
+    <div class="alert-list">${list.length?list.map(a=>`<div class="alert-item"><div class="alert-item-main"><div class="alert-item-title">${escText(a.account)}</div><div class="alert-item-sub">Nivel de batería: ${a.threshold}% · CUP y USD</div></div><button class="danger" onclick="deleteLevelAlert('${jsArg(a.id)}')">Borrar</button></div>`).join(""):'<div class="smalltxt">No hay alertas configuradas.</div>'}</div>
+  </div>`;
+}
+function openAlertCreateModal(){
+  if(!isReviewer()) return;
+  if(!allAccounts().length){ showNotice("Primero debe existir al menos una tabla.","Alertas","!"); return; }
+  state.alertCreateOpen=true;
+  state.drawer=false;
+  render();
+}
+function closeAlertCreateModal(){ state.alertCreateOpen=false; renderKeepScroll(); }
+async function createLevelAlert(){
+  if(!isReviewer()) return;
+  const account=String(document.getElementById("alertAccount")?.value||"").trim();
+  const threshold=Number(document.getElementById("alertThreshold")?.value||0);
+  if(!account || !threshold){ showNotice("Selecciona una tabla y un nivel de batería.","Alerta incompleta","!"); return; }
+  if(activeAlerts().some(a=>a.account===account && Number(a.threshold)===threshold)){
+    showNotice("Esa alerta ya existe para la tabla seleccionada.","Alerta duplicada","!"); return;
+  }
+  if("Notification" in window && Notification.permission==="default") await requestAppNotifications(false);
+  const now=Date.now();
+  alertConfigs=mergeAlertConfigs(alertConfigs,[{
+    id:`alert_${now.toString(36)}_${Math.random().toString(36).slice(2,8)}`,
+    account,
+    threshold,
+    createdAt:now,
+    updatedAt:now,
+    createdBy:notificationUserKey(),
+    deleted:false
+  }]);
+  saveAlertNotificationLocal();
+  state.alertCreateOpen=false;
+  evaluateAlertThresholds({deliver:true});
+  saveCloudDebounced();
+  showNotice("Alerta añadida correctamente.","Alerta creada","✓");
+}
+function deleteLevelAlert(encodedId){
+  if(!isReviewer()) return;
+  const id=fromJsArg(encodedId);
+  const now=Date.now();
+  alertConfigs=alertConfigs.map(a=>a.id===id?{...a,deleted:true,updatedAt:now}:a);
+  saveAlertNotificationLocal();
+  saveCloudDebounced();
+  renderKeepScroll();
+}
+function alertCreateModalHTML(){
+  if(!state.alertCreateOpen || !isReviewer()) return "";
+  return `<div class="alert-modal-screen" onclick="if(event.target===this)closeAlertCreateModal()"><div class="alert-modal"><h3>Añadir alerta</h3>
+    <label>Tabla</label><select id="alertAccount">${allAccounts().map(a=>`<option value="${escAttr(a)}">${escText(a)}</option>`).join("")}</select>
+    <label>Nivel de batería</label><select id="alertThreshold"><option value="25">25%</option><option value="50">50%</option><option value="75">75%</option><option value="100">100%</option></select>
+    <div class="smalltxt" style="margin-top:8px">La alerta se generará cuando CUP o USD alcance o baje de ese porcentaje.</div>
+    <div class="actions"><button class="secondary" onclick="closeAlertCreateModal()">Cancelar</button><button class="green" onclick="createLevelAlert()">Añadir alerta</button></div>
+  </div></div>`;
+}
+
 function total(c){return accounts().reduce((s,a)=>s+balance(a,c),0)}
 function generalAvgExit(c){return accounts().reduce((s,a)=>s+avgExit(a,c),0)}
 
@@ -857,6 +1202,8 @@ async function login(event=null){
     localStorage.setItem(SESSION_KEY,JSON.stringify(found));
 
     render();
+    updateAppBadge();
+    deliverRecentSystemNotifications();
     scheduleCloudRefresh("login",60,true,true);
     return true;
   }catch(e){
@@ -890,6 +1237,9 @@ function logout(){
   state.loginBusy=false;
   state.loginMessage="";
   state.loginMessageType="";
+  state.notificationsOpen=false;
+  state.alertCreateOpen=false;
+  clearAppBadgeOnly();
   render();
 }
 
@@ -912,6 +1262,8 @@ function navigationSnapshot(){
     userEditUsername: null,
     dateFilterOpen: false,
     confirmOpen: false,
+    notificationsOpen: false,
+    alertCreateOpen: false,
     statsAccount: state.statsAccount || "general"
   };
 }
@@ -935,7 +1287,9 @@ function hasOpenOverlay(){
     state.userCreateOpen ||
     state.userEditOpen ||
     state.dateFilterOpen ||
-    state.confirmOpen
+    state.confirmOpen ||
+    state.notificationsOpen ||
+    state.alertCreateOpen
   );
 }
 function isMenuPage(){
@@ -960,6 +1314,8 @@ function restoreMenuReturn(){
   state.userEditOpen=false;
   state.dateFilterOpen=false;
   state.confirmOpen=false;
+  state.notificationsOpen=false;
+  state.alertCreateOpen=false;
   render();
   scheduleCloudRefresh(`volver:${state.view}`,80,true,false);
   return true;
@@ -968,6 +1324,8 @@ function goBack(){
   // Bloqueo explícito: en Inicio y Tabla no hace nada.
   if(!hasOpenOverlay() && (state.view==="home" || state.view==="table")) return;
 
+  if(state.notificationsOpen){state.notificationsOpen=false;render();return;}
+  if(state.alertCreateOpen){state.alertCreateOpen=false;render();return;}
   if(state.confirmOpen){state.confirmOpen=false;render();return;}
   if(state.dateFilterOpen){state.dateFilterOpen=false;render();return;}
   if(state.userCreateOpen){state.userCreateOpen=false;render();return;}
@@ -1142,6 +1500,8 @@ function confirmRow(id,val){
   state.confirmBusyId=id;
   let r=data.find(x=>String(x.id)===String(id));
   if(r){
+    const noteInput=document.getElementById(`confirmNote-${id}`);
+    if(noteInput && canReview()) r.confirmationNote=String(noteInput.value||"").trim();
     r.confirmed=val;
     queueRecordUpsert(r);
   }
@@ -1149,6 +1509,17 @@ function confirmRow(id,val){
   saveCloudDebounced();
   renderKeepScroll();
   setTimeout(()=>{state.confirmBusyId=null;},520);
+}
+function saveConfirmationNote(id,value){
+  if(!canReview()) return;
+  const r=data.find(x=>String(x.id)===String(id));
+  if(!r) return;
+  const note=String(value||"").trim();
+  if(String(r.confirmationNote||"")===note) return;
+  r.confirmationNote=note;
+  queueRecordUpsert(r);
+  persistRecords();
+  saveCloudDebounced();
 }
 function addMovement(){let amount=Number(document.getElementById("amount").value||0),type=document.getElementById("type").value,desc=document.getElementById("desc").value.trim(),date=document.getElementById("date").value;if(date>new Date().toISOString().slice(0,10)){showNotice("La fecha no puede ser superior a la actual.","Fecha inválida","!");return}if(amount<=0||!desc){showNotice("Completa cantidad y descripción.","Datos incompletos","!");return}const rec=touchRecord({id:newRecordId(),account:currentAccount(),currency:state.currency,date,entry:type==="entrada"?amount:0,exit:type==="salida"?amount:0,desc,confirmed:false});data.push(rec);queueRecordUpsert(rec);persistRecords();saveCloudDebounced();go("table")}
 function saveAppearance(){let s=settings();s.appearance=document.getElementById("appearance").value;s.fontSize=document.getElementById("fontSize").value;saveSettings(s);saveCloudDebounced();render()}
@@ -1375,7 +1746,7 @@ function loginHTML(){
     </form>
   </div>`;
 }
-function shellHTML(){return `<div class="app"><div class="top"><div class="toprow"><div class="top-left">${backButtonHTML()}<div class="roleline">${state.user.name}</div></div><div class="top-controls">${currencyTabs()}<button class="menu-btn" onclick="toggleDrawer(true)"><img src="${SIMPLE_LOGO}"></button></div></div>${syncLineHTML()}</div><div class="content">${viewHTML()}</div>${bottomNav()}${drawerHTML()}${exportModalHTML()}${editModalHTML()}${addModalHTML()}${countModalHTML()}${dateFilterModalHTML()}${userCreateModalHTML()}${userEditModalHTML()}${confirmModalHTML()}${noticeHTML()}</div>`}
+function shellHTML(){return `<div class="app"><div class="top"><div class="toprow"><div class="top-left">${backButtonHTML()}<div class="roleline">${state.user.name}</div></div><div class="top-controls">${currencyTabs()}${notificationBellHTML()}<button class="menu-btn" onclick="toggleDrawer(true)"><img src="${SIMPLE_LOGO}"></button></div></div>${syncLineHTML()}</div><div class="content">${viewHTML()}</div>${bottomNav()}${drawerHTML()}${exportModalHTML()}${editModalHTML()}${addModalHTML()}${countModalHTML()}${dateFilterModalHTML()}${userCreateModalHTML()}${userEditModalHTML()}${confirmModalHTML()}${notificationsPanelHTML()}${alertCreateModalHTML()}${noticeHTML()}</div>`}
 function currencyTabs(){if(state.view==="settings"||state.view==="users")return "";return `<div class="currency-switch-wrap">${cloudDotHTML()}<div class="currency-switch"><input id="currencySwitch" type="checkbox" ${state.currency==="USD"?"checked":""} onchange="setCurrency(this.checked?'USD':'CUP')"><div class="knob"></div><div class="labels"><span class="cup">CUP</span><span class="usd">USD</span></div><label class="currency-switch-tap" for="currencySwitch"></label></div></div>`}
 function homeHTML(){return state.user.role==="usuario"?userHomeHTML():generalHomeHTML()}
 function userHomeHTML(){
@@ -1401,7 +1772,7 @@ function tableHTML(){
   <div class="grid" style="margin-top:10px"><div class="stat"><div class="label">Saldo actual</div><div class="value">${money(balance(a,c))} ${c}</div></div><div class="stat"><div class="label">Promedio de salidas</div><div class="value">${money(avgExit(a,c))} ${c}/día</div></div></div>
   <div class="actions action-bar">${canAdd()?'<button class="action-plus" onclick="openAddModal()" title="Agregar movimiento"><span class="plus-core"></span></button><button class="action-pill count-btn" onclick="openCountModal()" title="Conteo"><span class="btn-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="3"></rect><path d="M9 7h8"></path><path d="M9 12h8"></path><path d="M9 17h8"></path><path d="M6 7h.01"></path><path d="M6 12h.01"></path><path d="M6 17h.01"></path></svg></span><span class="btn-text">Conteo</span></button>':""}${canReview()?`<button class="action-pill icon-only ${state.pendingOnly?'filter-active':''}" onclick="togglePending()" title="Confirmar"><span class="btn-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.5l2.5 2.5L16 9.5"></path></svg></span><span class="btn-text">Confirmar</span></button>`:""}<button class="action-pill icon-only" onclick="openExportModal()" title="Exportar"><span class="btn-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v11"></path><path d="M8 10l4 4 4-4"></path><path d="M4 17v2a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-2"></path></svg></span><span class="btn-text">Exportar</span></button></div>
   ${hasFilters?`<div>${state.tableFilterDate?`<span class="filter-chip">Fecha: ${state.tableFilterDate}<button onclick="clearDateFilter()">×</button></span>`:""}${state.tableFilterType?`<span class="filter-chip">${state.tableFilterType==="entrada"?"Entradas":"Salidas"}<button onclick="clearTypeFilter()">×</button></span>`:""}${state.pendingOnly?`<span class="filter-chip">Por confirmar<button onclick="togglePending()">×</button></span>`:""}<span class="filter-chip"><button onclick="clearAllTableFilters()">Limpiar filtros</button></span></div>`:""}
-  <div class="tablewrap" onscroll="rememberTableScroll()"><table><thead><tr><th class="filter-th ${state.tableFilterDate?'active':''}" style="width:58px" onclick="openDateFilterModal()">Fecha</th><th class="filter-th ${state.tableFilterType==='entrada'?'active':''}" style="width:46px" onclick="toggleTypeFilter('entrada')">Entrada</th><th class="filter-th ${state.tableFilterType==='salida'?'active':''}" style="width:46px" onclick="toggleTypeFilter('salida')">Salida</th><th>Descripción</th><th style="width:52px">Total</th>${(canReview()||canSeeEditColumn())?`<th class="actions-col"><div class="actions-stack" style="justify-content:center">${canReview()?'<span class="th-icon">✓</span>':''}${canSeeEditColumn()?'<span class="th-icon">✎</span><span class="th-icon">🗑</span>':''}</div></th>`:""}</tr></thead><tbody>${displayRows.map(r=>`<tr class="${[r.count?'count-row':'', String(r.desc||'').toLowerCase().includes('ganancia')?'ganancia-row':''].filter(Boolean).join(' ')}"><td class="compact-date">${shortDate(r.date)}</td><td class="num">${r.entry?money(r.entry):""}</td><td class="num">${r.exit?money(r.exit):""}</td><td class="desc-cell">${r.desc}</td><td class="num totalcol">${money(r.totalRun)}</td>${(canReview()||canSeeEditColumn())?`<td class="actions-col"><div class="actions-stack">${canReview()?`<label class="confirm-check" title="Confirmar"><input type="checkbox" ${r.confirmed?'checked':''} onclick="event.stopPropagation()" onclick="event.stopPropagation()" onchange="lockedAction('confirm-'+${r.id},()=>confirmRow(${r.id},this.checked),520,event)"><span class="box"></span></label>`:''}${canSeeEditColumn()?`<button class="small secondary icon-edit" title="Modificar registro" onclick="lockedAction('edit-'+${r.id},()=>openEditModal(${r.id}),520,event)">✎</button><button class="delete-btn" title="Borrar" onclick="lockedAction('delete-'+${r.id},()=>deleteRowDirect(${r.id}),620,event)">✕</button>`:''}</div></td>`:""}</tr>`).join("")}</tbody></table></div></div>`;
+  <div class="tablewrap" onscroll="rememberTableScroll()"><table><thead><tr><th class="filter-th ${state.tableFilterDate?'active':''}" style="width:58px" onclick="openDateFilterModal()">Fecha</th><th class="filter-th ${state.tableFilterType==='entrada'?'active':''}" style="width:46px" onclick="toggleTypeFilter('entrada')">Entrada</th><th class="filter-th ${state.tableFilterType==='salida'?'active':''}" style="width:46px" onclick="toggleTypeFilter('salida')">Salida</th><th>Descripción</th><th style="width:52px">Total</th>${(canReview()||canSeeEditColumn())?`<th class="actions-col"><div class="actions-stack" style="justify-content:center">${canReview()?'<span class="th-icon">✓</span>':''}${canSeeEditColumn()?'<span class="th-icon">✎</span><span class="th-icon">🗑</span>':''}</div></th>`:""}${canReview()?`<th class="confirm-note-col">Descripción confirmación</th>`:""}</tr></thead><tbody>${displayRows.map(r=>`<tr class="${[r.count?'count-row':'', String(r.desc||'').toLowerCase().includes('ganancia')?'ganancia-row':''].filter(Boolean).join(' ')}"><td class="compact-date">${shortDate(r.date)}</td><td class="num">${r.entry?money(r.entry):""}</td><td class="num">${r.exit?money(r.exit):""}</td><td class="desc-cell">${r.desc}</td><td class="num totalcol">${money(r.totalRun)}</td>${(canReview()||canSeeEditColumn())?`<td class="actions-col"><div class="actions-stack">${canReview()?`<label class="confirm-check" title="Confirmar"><input type="checkbox" ${r.confirmed?'checked':''} onclick="event.stopPropagation()" onchange="lockedAction('confirm-'+${r.id},()=>confirmRow(${r.id},this.checked),520,event)"><span class="box"></span></label>`:''}${canSeeEditColumn()?`<button class="small secondary icon-edit" title="Modificar registro" onclick="lockedAction('edit-'+${r.id},()=>openEditModal(${r.id}),520,event)">✎</button><button class="delete-btn" title="Borrar" onclick="lockedAction('delete-'+${r.id},()=>deleteRowDirect(${r.id}),620,event)">✕</button>`:''}</div></td>`:""}${canReview()?`<td class="confirm-note-col"><input id="confirmNote-${r.id}" class="confirm-note-input" type="text" value="${escAttr(r.confirmationNote||'')}" placeholder="Descripción de confirmación" onblur="saveConfirmationNote(${r.id},this.value)" onkeydown="if(event.key==='Enter'){event.preventDefault();this.blur()}"></td>`:""}</tr>`).join("")}</tbody></table></div></div>`;
 }
 function addHTML(){let a=currentAccount(),c=state.currency;if(!canAdd())return `<div class="card"><h3>Sin permiso</h3><p>Este rol no puede agregar movimientos.</p></div>`;return `<div class="card"><h3>Agregar movimiento · ${a} · ${c}</h3><label>Fecha</label><input id="date" type="date" value="${new Date().toISOString().slice(0,10)}" max="${new Date().toISOString().slice(0,10)}"><label>Tipo</label><select id="type"><option value="entrada">Entrada</option><option value="salida" selected>Salida</option></select><label>Cantidad</label><input id="amount" type="number" placeholder="Cantidad" inputmode="decimal" step="any"><label>Descripción</label><textarea id="desc" placeholder="Descripción"></textarea><div class="actions"><button class="secondary" onclick="go('table')">Volver</button><button class="green" onclick="addMovement()">Guardar</button></div></div>`}
 
@@ -1871,7 +2242,7 @@ function usersHTML(){
   </div>`;
 }
 function settingsHTML(){
-  let s=settings(),isAdmin=state.user.role==="administrador";
+  let s=settings(),isAdmin=state.user.role==="administrador",reviewer=isReviewer();
   return `<div class="card"><h3>Ajustes</h3>${typeof cloudStatusText==="function"?`<div class="smalltxt" style="margin-bottom:10px">Supabase: ${cloudStatusText().text}</div>`:""}
     <label>Aspecto de la app</label>
     <select id="appearance" onchange="${isAdmin?'saveAdminSettings()':'saveAppearance()'}">
@@ -1908,7 +2279,8 @@ function settingsHTML(){
         </select>
       </div>
       <div class="smalltxt" style="margin-top:8px">El promedio toma las salidas de ese período y las divide entre la cantidad de tiempo seleccionada.</div>
-    `:"<div class='smalltxt' style='margin-top:10px'>Este rol solo puede modificar el aspecto de la app.</div>"}
+    `:reviewer?"<div class='smalltxt' style='margin-top:10px'>Puedes modificar el aspecto y configurar alertas.</div>":"<div class='smalltxt' style='margin-top:10px'>Este rol solo puede modificar el aspecto de la app.</div>"}
+    ${reviewer?alertsSettingsHTML():""}
   </div>`;
 }
 function viewHTML(){if(state.view==="home")return homeHTML();if(state.view==="table")return tableHTML();if(state.view==="add")return addHTML();if(state.view==="users")return usersHTML();if(state.view==="stats")return statsHTML();if(state.view==="settings")return settingsHTML();return homeHTML()}
@@ -2547,7 +2919,9 @@ function isModalFormOpen(){
     state?.userCreateOpen ||
     state?.userEditOpen ||
     state?.dateFilterOpen ||
-    state?.confirmOpen
+    state?.confirmOpen ||
+    state?.notificationsOpen ||
+    state?.alertCreateOpen
   );
 }
 function shouldDeferCloudRender(){
@@ -2586,6 +2960,10 @@ function persistAllLocal(){
   try{ localStorage.setItem(DELETED_RECORDS_KEY, JSON.stringify(deletedRecords)); }catch(e){}
   try{ localStorage.setItem(DELETED_USERS_KEY, JSON.stringify(deletedUsers)); }catch(e){}
   try{ localStorage.setItem(USERS_UPDATED_AT_KEY, String(localUsersUpdatedAt)); }catch(e){}
+  try{ localStorage.setItem(ALERTS_KEY, JSON.stringify(alertConfigs)); }catch(e){}
+  try{ localStorage.setItem(APP_NOTIFICATIONS_KEY, JSON.stringify(appNotifications)); }catch(e){}
+  try{ localStorage.setItem(ALERT_STATES_KEY, JSON.stringify(alertStates)); }catch(e){}
+  try{ localStorage.setItem(SHOWN_SYSTEM_NOTIFICATIONS_KEY, JSON.stringify(shownSystemNotifications)); }catch(e){}
 }
 
 /* Bloque anterior eliminado: Supabase se define al final. */
@@ -2598,6 +2976,7 @@ function nexusRender(){
     restoreScrollState(pos);
   }
   updateSyncDotVisual();
+  updateAppBadge();
   state.keepTableScrollOnce = false;
 }
 
@@ -2855,6 +3234,9 @@ function cloudPayload(){
     records: mergeRecords(data,data,deletedRecords),
     deletedRecords: mergeDeletedRecords(deletedRecords,[]),
     disabledTables: disabledTables,
+    alerts: mergeAlertConfigs(alertConfigs,[]),
+    notifications: mergeAppNotifications(appNotifications,[]),
+    alertStates: mergeAlertStates(alertStates,{}),
     settings: settings(),
     resetVersion: NEXUS_RESET_VERSION,
     updatedAtClient: Date.now(),
@@ -2883,6 +3265,20 @@ async function uploadMetadataSupabase(payloadOverride=null){
       );
       saveUsers();
 
+      alertConfigs=mergeAlertConfigs(
+        Array.isArray(payload.alerts)?payload.alerts:alertConfigs,
+        Array.isArray(remotePayload.alerts)?remotePayload.alerts:[]
+      );
+      appNotifications=mergeAppNotifications(
+        Array.isArray(payload.notifications)?payload.notifications:appNotifications,
+        Array.isArray(remotePayload.notifications)?remotePayload.notifications:[]
+      );
+      alertStates=mergeAlertStates(
+        payload.alertStates||alertStates,
+        remotePayload.alertStates||{}
+      );
+      saveAlertNotificationLocal();
+
       payload={
         ...payload,
         users,
@@ -2891,7 +3287,10 @@ async function uploadMetadataSupabase(payloadOverride=null){
           Number(remotePayload.usersUpdatedAt||0),
           ...users.map(userSyncTime)
         ),
-        deletedUsers:normalizeDeletedUsers(deletedUsers)
+        deletedUsers:normalizeDeletedUsers(deletedUsers),
+        alerts:mergeAlertConfigs(alertConfigs,[]),
+        notifications:mergeAppNotifications(appNotifications,[]),
+        alertStates:mergeAlertStates(alertStates,{})
       };
     }
   }catch(e){
@@ -3039,6 +3438,9 @@ async function fallbackSyncMainDoc(opsToFlush){
     records:finalRecords,
     deletedRecords:finalDeleted,
     disabledTables,
+    alerts:mergeAlertConfigs(alertConfigs,[]),
+    notifications:mergeAppNotifications(appNotifications,[]),
+    alertStates:mergeAlertStates(alertStates,{}),
     settings:settings(),
     resetVersion:NEXUS_RESET_VERSION,
     updatedAtClient:Date.now(),
@@ -3082,6 +3484,9 @@ async function pollCloudRecordsSupabase(renderAfter=false){
     data=mergeRecords(nexusCloud.cloudRecordsCache,data,deletedRecords);
     persistRecords();
     saveDeletedRecords();
+
+    const generatedAlerts=evaluateAlertThresholds({deliver:true});
+    if(generatedAlerts>0) await uploadMetadataSupabase();
 
     nexusCloud.ready=true;
     if(!offlineOps.length && !nexusCloud.syncing && currentLocalTableHash()===currentCloudTableHash()){
@@ -3166,6 +3571,7 @@ async function flushPendingOps(){
   }
 }
 function saveCloudDebounced(){
+  evaluateAlertThresholds({deliver:true});
   persistAllLocal();
   if(nexusCloud.applying) return;
   if(!validCloudConfig()){
@@ -3230,6 +3636,12 @@ function applyCloudSnapshot(payload){
       disabledTables=payload.disabledTables;
       localStorage.setItem(DISABLED_TABLES_KEY, JSON.stringify(disabledTables));
     }
+    if(Array.isArray(payload.alerts)) alertConfigs=mergeAlertConfigs(alertConfigs,payload.alerts);
+    if(Array.isArray(payload.notifications)) appNotifications=mergeAppNotifications(appNotifications,payload.notifications);
+    if(payload.alertStates) alertStates=mergeAlertStates(alertStates,payload.alertStates);
+    saveAlertNotificationLocal();
+    updateAppBadge();
+    deliverRecentSystemNotifications();
     if(payload.settings) localStorage.setItem(SETTINGS_KEY, JSON.stringify(payload.settings));
 
     const remoteDeleted=Array.isArray(payload.deletedRecords)?payload.deletedRecords:[];
@@ -3330,6 +3742,15 @@ async function refreshCloudNow(reason="manual",renderAfter=true,force=false){
   })();
 
   return nexusCloud.refreshPromise;
+}
+
+
+function setupNotificationOpenListener(){
+  if(window.__nexusNotificationOpenListenerReady) return;
+  window.__nexusNotificationOpenListenerReady=true;
+  navigator.serviceWorker?.addEventListener("message",event=>{
+    if(event.data?.type==="NEXUS_NOTIFICATION_OPEN" && isReviewer()) openNotificationsPanel();
+  });
 }
 
 function setupCloudRefreshTriggers(){
@@ -3447,6 +3868,7 @@ if("serviceWorker" in navigator){
 }
 
 setupCloudRefreshTriggers();
+setupNotificationOpenListener();
 revalidateActiveSession();
 initCloudSync().finally(()=>{
   revalidateActiveSession();

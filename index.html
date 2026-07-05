@@ -878,18 +878,63 @@ function vapidPublicKeyBytes(base64String){
   const padding="=".repeat((4-base64String.length%4)%4);
   const base64=(base64String+padding).replace(/-/g,"+").replace(/_/g,"/");
   const rawData=atob(base64);
-  return Uint8Array.from([...rawData].map(char=>char.charCodeAt(0)));
+  const bytes=Uint8Array.from([...rawData].map(char=>char.charCodeAt(0)));
+  return bytes.buffer.slice(bytes.byteOffset,bytes.byteOffset+bytes.byteLength);
+}
+
+
+async function ensurePushServiceWorker(){
+  if(!("serviceWorker" in navigator)){
+    throw new Error("SERVICE_WORKER_NO_DISPONIBLE");
+  }
+
+  let registration=await navigator.serviceWorker.getRegistration("./");
+
+  if(!registration){
+    registration=await navigator.serviceWorker.register(
+      "./service-worker.js",
+      {scope:"./"}
+    );
+  }
+
+  try{
+    await registration.update();
+  }catch(e){
+    console.warn("No se pudo actualizar el service worker:",e);
+  }
+
+  const ready=await Promise.race([
+    navigator.serviceWorker.ready,
+    new Promise((_,reject)=>
+      setTimeout(()=>reject(new Error("SERVICE_WORKER_READY_TIMEOUT")),15000)
+    )
+  ]);
+
+  if(!ready?.pushManager){
+    throw new Error("PUSH_MANAGER_NO_DISPONIBLE_EN_REGISTRO");
+  }
+
+  return ready;
+}
+
+function pushErrorText(error,stage="desconocido"){
+  const name=String(error?.name||"Error");
+  const message=String(error?.message||error||"Sin detalle");
+  return `Etapa: ${stage}\n${name}: ${message}`;
 }
 
 async function savePushSubscriptionToCloud(subscription){
-  if(!subscription || !state.user || !isReviewer() || !validCloudConfig()) return false;
+  if(!subscription) throw new Error("SUSCRIPCION_VACIA");
+  if(!state.user) throw new Error("SESION_NO_DISPONIBLE");
+  if(!isReviewer()) throw new Error("ROL_SIN_PERMISO_PUSH");
+  if(!validCloudConfig()) throw new Error("SUPABASE_NO_CONFIGURADO");
 
   const json=typeof subscription.toJSON==="function"
     ? subscription.toJSON()
     : subscription;
 
   const endpoint=String(json?.endpoint||subscription.endpoint||"");
-  if(!endpoint) return false;
+  if(!endpoint) throw new Error("ENDPOINT_PUSH_VACIO");
 
   const row={
     endpoint,
@@ -902,32 +947,54 @@ async function savePushSubscriptionToCloud(subscription){
     updated_at_client:Date.now()
   };
 
-  await supabaseFetch(
-    NEXUS_PUSH_TABLE,
-    "on_conflict=endpoint",
-    {
-      method:"POST",
-      headers:supabaseHeaders("resolution=merge-duplicates,return=minimal"),
-      body:JSON.stringify(row)
-    },
-    18000
-  );
+  try{
+    await supabaseFetch(
+      NEXUS_PUSH_TABLE,
+      "on_conflict=endpoint",
+      {
+        method:"POST",
+        headers:supabaseHeaders("resolution=merge-duplicates,return=minimal"),
+        body:JSON.stringify(row)
+      },
+      18000
+    );
+  }catch(e){
+    e.nexusPushStage="guardar-en-supabase";
+    throw e;
+  }
 
   return true;
 }
 
 async function subscribeBackgroundPush(){
-  if(!pushSupported() || !state.user || !isReviewer()) return false;
-  if(Notification.permission!=="granted") return false;
+  if(!pushSupported()) throw new Error("WEB_PUSH_NO_SOPORTADO");
+  if(!state.user) throw new Error("SESION_NO_DISPONIBLE");
+  if(!isReviewer()) throw new Error("ROL_SIN_PERMISO_PUSH");
+  if(Notification.permission!=="granted"){
+    throw new Error(`PERMISO_NOTIFICACIONES_${Notification.permission}`);
+  }
 
-  const registration=await navigator.serviceWorker.ready;
-  let subscription=await registration.pushManager.getSubscription();
+  let registration;
+  try{
+    registration=await ensurePushServiceWorker();
+  }catch(e){
+    e.nexusPushStage="service-worker";
+    throw e;
+  }
 
-  if(!subscription){
-    subscription=await registration.pushManager.subscribe({
-      userVisibleOnly:true,
-      applicationServerKey:vapidPublicKeyBytes(NEXUS_VAPID_PUBLIC_KEY)
-    });
+  let subscription;
+  try{
+    subscription=await registration.pushManager.getSubscription();
+
+    if(!subscription){
+      subscription=await registration.pushManager.subscribe({
+        userVisibleOnly:true,
+        applicationServerKey:vapidPublicKeyBytes(NEXUS_VAPID_PUBLIC_KEY)
+      });
+    }
+  }catch(e){
+    e.nexusPushStage="crear-suscripcion-push";
+    throw e;
   }
 
   await savePushSubscriptionToCloud(subscription);
@@ -938,11 +1005,18 @@ async function syncExistingPushSubscription(){
   if(!pushSupported() || !state.user || !isReviewer()) return false;
   if(Notification.permission!=="granted") return false;
 
-  const registration=await navigator.serviceWorker.ready;
-  const subscription=await registration.pushManager.getSubscription();
-  if(!subscription) return false;
-
-  return savePushSubscriptionToCloud(subscription);
+  try{
+    const registration=await ensurePushServiceWorker();
+    const subscription=await registration.pushManager.getSubscription();
+    if(!subscription) return false;
+    return savePushSubscriptionToCloud(subscription);
+  }catch(e){
+    console.warn(
+      "No se pudo reasociar la suscripción Push:",
+      pushErrorText(e,e.nexusPushStage||"reasociar")
+    );
+    return false;
+  }
 }
 
 async function disableCurrentPushSubscription(){
@@ -1006,7 +1080,7 @@ async function requestAppNotifications(showFeedback=true){
         showNotice(
           subscribed
             ? "Notificaciones activadas. NEXUS podrá avisarte también en segundo plano o con la PWA cerrada."
-            : "El permiso fue concedido, pero no se pudo registrar la suscripción push. Revisa la configuración del servicio push.",
+            : "No se pudo registrar la suscripción Push.",
           "Notificaciones",
           subscribed?"✓":"!"
         );
@@ -1017,18 +1091,23 @@ async function requestAppNotifications(showFeedback=true){
     }
 
     if(showFeedback) showNotice(
-      "El permiso de notificaciones no está habilitado. Las alertas seguirán apareciendo dentro de NEXUS.",
+      `Permiso de notificaciones: ${permission}. Revisa Ajustes de iOS > Notificaciones > NEXUS.`,
       "Notificaciones",
       "!"
     );
     return false;
   }catch(e){
-    console.warn("Activación de Web Push falló:",e);
+    const stage=String(e?.nexusPushStage||"activar-web-push");
+    const detail=pushErrorText(e,stage);
+
+    console.error("Activación de Web Push falló:",detail,e);
+
     if(showFeedback) showNotice(
-      "No se pudo activar Web Push. Tus datos no fueron modificados.",
-      "Notificaciones",
+      "No se pudo activar Web Push.\n\n"+detail,
+      "Error Web Push",
       "!"
     );
+
     return false;
   }
 }
@@ -4136,9 +4215,9 @@ setInterval(()=>{
 },900);
 
 if("serviceWorker" in navigator){
-  window.addEventListener("load",()=>{
-    navigator.serviceWorker.register("./service-worker.js").catch(e=>console.warn("Service worker no registrado:",e));
-  });
+  ensurePushServiceWorker().catch(e=>
+    console.warn("Service worker no registrado/preparado:",e)
+  );
 }
 
 setupCloudRefreshTriggers();

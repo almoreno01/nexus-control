@@ -1,4 +1,4 @@
-const CACHE_NAME = "nexus-pwa-web-push-login-v15";
+const CACHE_NAME = "nexus-pwa-web-push-ios-debug-v15-1";
 const APP_ASSETS = [
   "./",
   "./index.html",

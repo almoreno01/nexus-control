@@ -44,10 +44,16 @@
 .notifications-screen,.alert-modal-screen{position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:18px}
 .notifications-panel,.alert-modal{width:min(620px,100%);max-height:min(78vh,720px);overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:22px;padding:20px;box-shadow:0 24px 80px rgba(0,0,0,.24)}
 .notifications-head,.alerts-settings-head{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.notifications-list{display:grid;gap:10px;margin-top:14px}
-.notification-item{border:1px solid var(--line);border-radius:14px;padding:13px;background:var(--bg)}
+.notifications-head-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+.notification-clear-all{white-space:nowrap}
+.notifications-list{display:grid;gap:10px;margin-top:14px;overflow:hidden}
+.notification-item{position:relative;border:1px solid var(--line);border-radius:14px;padding:13px 48px 13px 13px;background:var(--bg);touch-action:pan-y;transition:transform .16s ease,opacity .16s ease}
+.notification-item.swiping-away{transform:translateX(130%)!important;opacity:0!important}
+.notification-delete{position:absolute;top:8px;right:8px;width:32px;height:32px;min-width:32px;border:0;border-radius:50%;display:grid;place-items:center;padding:0;background:transparent;color:var(--muted);font-size:1.55rem;font-weight:500;line-height:1;cursor:pointer}
+.notification-delete:hover,.notification-delete:focus-visible{background:var(--line);color:var(--text)}
 .notification-title{font-weight:900;margin-bottom:5px}
 .notification-meta{font-size:.78rem;color:var(--muted);margin-top:7px}
+.notification-swipe-help{margin-top:12px;text-align:center}
 .alerts-settings{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
 .alert-list{display:grid;gap:9px;margin-top:12px}
 .alert-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px;border:1px solid var(--line);border-radius:14px}
@@ -55,7 +61,7 @@
 .alert-item-title{font-weight:900}
 .alert-item-sub{color:var(--muted);font-size:.8rem;margin-top:3px}
 .notification-permission{margin-top:10px;padding:10px 12px;border-radius:12px;background:var(--bg);border:1px solid var(--line)}
-@media(max-width:700px){.confirm-note-col{min-width:180px;width:180px}.confirm-note-input{min-width:155px}.notification-bell{width:40px;height:40px;min-width:40px}.notifications-screen,.alert-modal-screen{align-items:flex-end;padding:10px}.notifications-panel,.alert-modal{max-height:86vh;border-radius:22px 22px 14px 14px}}
+@media(max-width:700px){.confirm-note-col{min-width:180px;width:180px}.confirm-note-input{min-width:155px}.notification-bell{width:40px;height:40px;min-width:40px}.notifications-screen,.alert-modal-screen{align-items:flex-end;padding:10px}.notifications-panel,.alert-modal{max-height:86vh;border-radius:22px 22px 14px 14px}.notifications-head{align-items:flex-start}.notifications-head-actions{gap:6px}.notification-clear-all{padding-left:11px;padding-right:11px}.notification-item{padding-right:46px}}
 
 </style></head><body><div id="root"></div>
 <script src="./supabase-config.js"></script>
@@ -800,23 +806,76 @@ function normalizeAppNotification(item){
     amount:Number(item.amount||0),
     createdAt:Number(item.createdAt||Date.now()),
     updatedAt:Number(item.updatedAt||item.createdAt||Date.now()),
-    readBy:[...new Set((Array.isArray(item.readBy)?item.readBy:[]).map(String).filter(Boolean))]
+    readBy:[
+      ...new Set(
+        (Array.isArray(item.readBy)?item.readBy:[])
+          .map(String)
+          .filter(Boolean)
+      )
+    ],
+    deletedBy:[
+      ...new Set(
+        (Array.isArray(item.deletedBy)?item.deletedBy:[])
+          .map(String)
+          .filter(Boolean)
+      )
+    ]
   };
 }
 function mergeAppNotifications(localList=[],remoteList=[]){
   const map=new Map();
+
   const put=(raw,priority)=>{
     const item=normalizeAppNotification(raw);
     if(!item) return;
+
     const old=map.get(item.id);
-    if(!old){ map.set(item.id,{item,priority}); return; }
-    const newer=item.updatedAt>old.item.updatedAt || (item.updatedAt===old.item.updatedAt && priority>=old.priority) ? item : old.item;
-    const readBy=[...new Set([...(old.item.readBy||[]),...(item.readBy||[])])];
-    map.set(item.id,{item:{...newer,readBy,updatedAt:Math.max(old.item.updatedAt,item.updatedAt)},priority:Math.max(old.priority,priority)});
+    if(!old){
+      map.set(item.id,{item,priority});
+      return;
+    }
+
+    const newer=
+      item.updatedAt>old.item.updatedAt ||
+      (item.updatedAt===old.item.updatedAt && priority>=old.priority)
+        ? item
+        : old.item;
+
+    const readBy=[
+      ...new Set([
+        ...(old.item.readBy||[]),
+        ...(item.readBy||[])
+      ])
+    ];
+
+    const deletedBy=[
+      ...new Set([
+        ...(old.item.deletedBy||[]),
+        ...(item.deletedBy||[])
+      ])
+    ];
+
+    map.set(item.id,{
+      item:{
+        ...newer,
+        readBy,
+        deletedBy,
+        updatedAt:Math.max(
+          Number(old.item.updatedAt||0),
+          Number(item.updatedAt||0)
+        )
+      },
+      priority:Math.max(old.priority,priority)
+    });
   };
+
   (remoteList||[]).forEach(n=>put(n,1));
   (localList||[]).forEach(n=>put(n,2));
-  return [...map.values()].map(x=>x.item).sort((a,b)=>b.createdAt-a.createdAt).slice(0,300);
+
+  return [...map.values()]
+    .map(x=>x.item)
+    .sort((a,b)=>b.createdAt-a.createdAt)
+    .slice(0,300);
 }
 function mergeAlertStates(localStates={},remoteStates={}){
   const out={};
@@ -840,7 +899,14 @@ function saveAlertNotificationLocal(){
   localStorage.setItem(SHOWN_SYSTEM_NOTIFICATIONS_KEY,JSON.stringify(shownSystemNotifications||{}));
 }
 function activeAlerts(){ return alertConfigs.filter(a=>!a.deleted && a.account); }
-function currentNotifications(){ return isReviewer()?appNotifications.slice().sort((a,b)=>b.createdAt-a.createdAt):[]; }
+function currentNotifications(){
+  if(!isReviewer()) return [];
+  const key=notificationUserKey();
+  return appNotifications
+    .filter(n=>!(n.deletedBy||[]).includes(key))
+    .slice()
+    .sort((a,b)=>b.createdAt-a.createdAt);
+}
 function unreadNotificationCount(){
   if(!isReviewer()) return 0;
   const key=notificationUserKey();
@@ -1117,34 +1183,16 @@ function notificationBody(item){
   return `${item.account} · ${item.currency}: nivel ${item.pct}% (alerta ${item.threshold}%). Saldo ${money(item.amount)} ${item.currency}.`;
 }
 async function showSystemNotification(item){
-  if(!item || !isReviewer() || !("Notification" in window) || Notification.permission!=="granted") return false;
-  if(shownSystemNotifications[item.id]) return false;
-  try{
-    const registration=await navigator.serviceWorker?.ready;
-    if(!registration || typeof registration.showNotification!=="function") return false;
-    await registration.showNotification("NEXUS · Alerta de nivel",{
-      body:notificationBody(item),
-      tag:item.id,
-      icon:"./icons/icon-192.png",
-      badge:"./icons/icon-192.png",
-      data:{url:"./"}
-    });
-    shownSystemNotifications[item.id]=Date.now();
-    const keys=Object.keys(shownSystemNotifications);
-    if(keys.length>500){
-      keys.sort((a,b)=>Number(shownSystemNotifications[a])-Number(shownSystemNotifications[b]));
-      keys.slice(0,keys.length-300).forEach(k=>delete shownSystemNotifications[k]);
-    }
-    saveAlertNotificationLocal();
-    return true;
-  }catch(e){ console.warn("No se pudo mostrar la notificación del sistema:",e); return false; }
+  // V15.4: las alertas del sistema se muestran únicamente mediante
+  // Web Push recibido por el service worker. La página no vuelve a
+  // mostrar el mismo historial como notificación del sistema.
+  return false;
 }
 async function deliverRecentSystemNotifications(){
-  if(!isReviewer()) return;
-  const key=notificationUserKey();
-  const cutoff=Date.now()-10*60*1000;
-  const pending=currentNotifications().filter(n=>n.createdAt>=cutoff && !(n.readBy||[]).includes(key) && !shownSystemNotifications[n.id]);
-  for(const item of pending.slice().reverse()) await showSystemNotification(item);
+  // Intencionalmente desactivado.
+  // El historial de nexus_meta se muestra dentro de NEXUS, pero no se
+  // reinyecta como notificación del sistema al abrir o sincronizar la app.
+  return false;
 }
 function alertStateKey(alert,currency){ return `${alert.id}|${currency}`; }
 function latestAccountRecordStamp(account,currency){
@@ -1171,25 +1219,253 @@ function createThresholdNotification(alert,currency,pct){
 function evaluateAlertThresholds({deliver=true}={}){
   let generated=[];
   const now=Date.now();
+
   activeAlerts().forEach(alert=>{
     ["CUP","USD"].forEach(currency=>{
       const pct=level(alert.account,currency).pct;
       const key=alertStateKey(alert,currency);
       const previous=alertStates[key]||null;
       const below=pct<=alert.threshold;
-      if(below && !previous?.below) generated.push(createThresholdNotification(alert,currency,pct));
-      alertStates[key]={below,lastPct:pct,updatedAt:now};
+
+      if(below && !previous?.below){
+        generated.push(
+          createThresholdNotification(alert,currency,pct)
+        );
+      }
+
+      alertStates[key]={
+        below,
+        lastPct:pct,
+        updatedAt:now
+      };
     });
   });
+
   if(generated.length){
     saveAlertNotificationLocal();
     updateAppBadge();
-    if(deliver && isReviewer()) generated.forEach(item=>showSystemNotification(item));
+
+    // No se muestra notificación del sistema aquí.
+    // nexus-alert-push es la única fuente de notificaciones del sistema.
   }else{
-    localStorage.setItem(ALERT_STATES_KEY,JSON.stringify(alertStates||{}));
+    localStorage.setItem(
+      ALERT_STATES_KEY,
+      JSON.stringify(alertStates||{})
+    );
   }
+
   return generated.length;
 }
+
+let notificationSwipeState={
+  id:"",
+  startX:0,
+  startY:0,
+  active:false
+};
+
+async function closeSystemNotificationTag(notificationId){
+  try{
+    const registration=await navigator.serviceWorker?.ready;
+    if(!registration || typeof registration.getNotifications!=="function"){
+      return false;
+    }
+
+    const list=await registration.getNotifications({
+      tag:String(notificationId||"")
+    });
+
+    list.forEach(notification=>notification.close());
+    return true;
+  }catch(e){
+    console.warn("No se pudo cerrar la notificación del sistema:",e);
+    return false;
+  }
+}
+
+async function closeAllNexusSystemNotifications(){
+  try{
+    const registration=await navigator.serviceWorker?.ready;
+    if(!registration || typeof registration.getNotifications!=="function"){
+      return false;
+    }
+
+    const list=await registration.getNotifications();
+    list.forEach(notification=>{
+      const tag=String(notification.tag||"");
+      if(tag.startsWith("level_")) notification.close();
+    });
+
+    return true;
+  }catch(e){
+    console.warn("No se pudieron cerrar las notificaciones del sistema:",e);
+    return false;
+  }
+}
+
+function deleteAppNotification(encodedId){
+  if(!isReviewer()) return;
+
+  const id=fromJsArg(encodedId);
+  const key=notificationUserKey();
+  if(!id || !key) return;
+
+  const now=Date.now();
+  let changed=false;
+
+  appNotifications=appNotifications.map(item=>{
+    if(String(item.id)!==String(id)) return item;
+
+    const deletedBy=new Set(item.deletedBy||[]);
+    const readBy=new Set(item.readBy||[]);
+
+    if(!deletedBy.has(key)){
+      deletedBy.add(key);
+      changed=true;
+    }
+
+    readBy.add(key);
+
+    return {
+      ...item,
+      deletedBy:[...deletedBy],
+      readBy:[...readBy],
+      updatedAt:now
+    };
+  });
+
+  if(!changed) return;
+
+  saveAlertNotificationLocal();
+  updateAppBadge();
+  closeSystemNotificationTag(id);
+  saveCloudDebounced();
+  renderKeepScroll();
+}
+
+function requestDeleteAllNotifications(){
+  if(!isReviewer() || !currentNotifications().length) return;
+
+  showConfirm(
+    "Eliminar notificaciones",
+    "¿Eliminar todas las notificaciones de tu bandeja?",
+    "deleteAllNotifications",
+    null
+  );
+}
+
+function deleteAllAppNotifications(){
+  if(!isReviewer()) return;
+
+  const key=notificationUserKey();
+  if(!key) return;
+
+  const visibleIds=new Set(
+    currentNotifications().map(n=>String(n.id))
+  );
+
+  if(!visibleIds.size) return;
+
+  const now=Date.now();
+
+  appNotifications=appNotifications.map(item=>{
+    if(!visibleIds.has(String(item.id))) return item;
+
+    return {
+      ...item,
+      deletedBy:[
+        ...new Set([
+          ...(item.deletedBy||[]),
+          key
+        ])
+      ],
+      readBy:[
+        ...new Set([
+          ...(item.readBy||[]),
+          key
+        ])
+      ],
+      updatedAt:now
+    };
+  });
+
+  saveAlertNotificationLocal();
+  updateAppBadge();
+  closeAllNexusSystemNotifications();
+  saveCloudDebounced();
+  renderKeepScroll();
+}
+
+function startNotificationSwipe(event,element){
+  if(!event.touches || event.touches.length!==1 || !element) return;
+
+  const touch=event.touches[0];
+
+  notificationSwipeState={
+    id:String(element.dataset.notificationId||""),
+    startX:touch.clientX,
+    startY:touch.clientY,
+    active:true
+  };
+
+  element.classList.remove("swiping-away");
+}
+
+function moveNotificationSwipe(event,element){
+  if(
+    !notificationSwipeState.active ||
+    !event.touches ||
+    event.touches.length!==1 ||
+    !element
+  ) return;
+
+  const touch=event.touches[0];
+  const dx=touch.clientX-notificationSwipeState.startX;
+  const dy=Math.abs(
+    touch.clientY-notificationSwipeState.startY
+  );
+
+  if(dy>35) return;
+
+  const limited=Math.max(-110,Math.min(110,dx));
+  element.style.transform=`translateX(${limited}px)`;
+  element.style.opacity=String(
+    Math.max(.55,1-Math.abs(limited)/250)
+  );
+}
+
+function endNotificationSwipe(event,element){
+  if(!notificationSwipeState.active || !element) return;
+
+  const changed=event.changedTouches?.[0];
+  const id=notificationSwipeState.id;
+
+  notificationSwipeState.active=false;
+
+  if(!changed){
+    element.style.transform="";
+    element.style.opacity="";
+    return;
+  }
+
+  const dx=changed.clientX-notificationSwipeState.startX;
+  const dy=Math.abs(
+    changed.clientY-notificationSwipeState.startY
+  );
+
+  if(Math.abs(dx)>=72 && dy<=60 && id){
+    element.classList.add("swiping-away");
+    setTimeout(
+      ()=>deleteAppNotification(jsArg(id)),
+      140
+    );
+    return;
+  }
+
+  element.style.transform="";
+  element.style.opacity="";
+}
+
 function markAllNotificationsRead(saveCloud=true){
   if(!isReviewer()) return;
   const key=notificationUserKey();
@@ -1219,11 +1495,57 @@ function openNotificationsPanel(){
 function closeNotificationsPanel(){ state.notificationsOpen=false; renderKeepScroll(); }
 function notificationsPanelHTML(){
   if(!state.notificationsOpen || !isReviewer()) return "";
+
   const list=currentNotifications();
-  return `<div class="notifications-screen" onclick="if(event.target===this)closeNotificationsPanel()"><div class="notifications-panel">
-    <div class="notifications-head"><div><h3 style="margin:0">Notificaciones</h3><div class="smalltxt">Alertas de nivel de las tablas</div></div><button class="secondary" onclick="closeNotificationsPanel()">Cerrar</button></div>
-    <div class="notifications-list">${list.length?list.map(n=>`<div class="notification-item"><div class="notification-title">${escText(n.account)} · ${escText(n.currency)} · ${n.pct}%</div><div>${escText(notificationBody(n))}</div><div class="notification-meta">${new Date(n.createdAt).toLocaleString("es-ES")}</div></div>`).join(""):'<div class="smalltxt">No hay notificaciones.</div>'}</div>
-  </div></div>`;
+
+  return `<div class="notifications-screen" onclick="if(event.target===this)closeNotificationsPanel()">
+    <div class="notifications-panel">
+      <div class="notifications-head">
+        <div>
+          <h3 style="margin:0">Notificaciones</h3>
+          <div class="smalltxt">Alertas de nivel de las tablas</div>
+        </div>
+
+        <div class="notifications-head-actions">
+          ${list.length?`<button class="danger notification-clear-all" onclick="requestDeleteAllNotifications()">Eliminar todo</button>`:""}
+          <button class="secondary" onclick="closeNotificationsPanel()">Cerrar</button>
+        </div>
+      </div>
+
+      <div class="notifications-list">
+        ${list.length?list.map(n=>`
+          <div
+            class="notification-item"
+            data-notification-id="${escAttr(n.id)}"
+            ontouchstart="startNotificationSwipe(event,this)"
+            ontouchmove="moveNotificationSwipe(event,this)"
+            ontouchend="endNotificationSwipe(event,this)"
+            ontouchcancel="endNotificationSwipe(event,this)"
+          >
+            <button
+              class="notification-delete"
+              type="button"
+              title="Eliminar notificación"
+              aria-label="Eliminar notificación"
+              onclick="event.stopPropagation();deleteAppNotification('${jsArg(n.id)}')"
+            >×</button>
+
+            <div class="notification-title">
+              ${escText(n.account)} · ${escText(n.currency)} · ${n.pct}%
+            </div>
+
+            <div>${escText(notificationBody(n))}</div>
+
+            <div class="notification-meta">
+              ${new Date(n.createdAt).toLocaleString("es-ES")}
+            </div>
+          </div>
+        `).join(""):'<div class="smalltxt">No hay notificaciones.</div>'}
+      </div>
+
+      ${list.length?`<div class="smalltxt notification-swipe-help">Desliza una notificación hacia un lado para eliminarla.</div>`:""}
+    </div>
+  </div>`;
 }
 function alertsSettingsHTML(){
   if(!isReviewer()) return "";
@@ -2982,6 +3304,10 @@ function confirmAccept(){
   }
   if(action==="deleteTable"){
     deleteTableNow(payload);
+    return;
+  }
+  if(action==="deleteAllNotifications"){
+    deleteAllAppNotifications();
     return;
   }
 

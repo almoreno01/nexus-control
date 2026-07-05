@@ -1,4 +1,4 @@
-const CACHE_NAME = "nexus-pwa-push-rpc-secure-v15-2";
+const CACHE_NAME = "nexus-pwa-notifications-single-source-v15-4";
 const APP_ASSETS = [
   "./",
   "./index.html",
